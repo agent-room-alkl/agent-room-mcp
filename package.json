@@ -1,0 +1,22 @@
+{
+  "name": "agent-room-mcp-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Workspace root for the agent-room-mcp npm package — the single publish source for Agent Room's MCP server.",
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "packages/upstash-client",
+    "apps/mcp"
+  ],
+  "scripts": {
+    "build": "npm -ws run build --if-present",
+    "test": "npm -ws run test --if-present",
+    "typecheck": "npm -w apps/mcp run typecheck",
+    "release": "npm -w apps/mcp publish"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  }
+}
