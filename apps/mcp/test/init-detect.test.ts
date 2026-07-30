@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detectInstallTargets, readJson, vscodeMcpPathFor } from '../src/init.js';
+import { copilotMcpConfigPathFor, detectInstallTargets, readJson, vscodeMcpPathFor } from '../src/init.js';
 
 // node:path joins with backslashes on Windows, so fixture paths and
 // assertions normalize separators to keep this suite platform-agnostic.
@@ -57,6 +57,24 @@ describe('detectInstallTargets', () => {
     })).resolves.toEqual(['vscode']);
 
     await expect(detector(['/home/agent/.config/Code'])).resolves.toEqual(['vscode']);
+  });
+
+  it('detects the GitHub Copilot app/CLI from ~/.copilot or the copilot binary', async () => {
+    await expect(detector(['/home/agent/.copilot'])).resolves.toEqual(['copilot']);
+    await expect(detectInstallTargets({
+      home: '/home/agent',
+      platform: 'linux',
+      env: {},
+      whichCmd: async (cmd) => (cmd === 'copilot' ? '/usr/bin/copilot' : null),
+      pathExistsFn: async () => false,
+    })).resolves.toEqual(['copilot']);
+  });
+});
+
+describe('copilotMcpConfigPathFor', () => {
+  it('uses COPILOT_HOME when set, ~/.copilot otherwise', () => {
+    expect(norm(copilotMcpConfigPathFor('/home/agent'))).toBe('/home/agent/.copilot/mcp-config.json');
+    expect(norm(copilotMcpConfigPathFor('/home/agent', '/opt/copilot'))).toBe('/opt/copilot/mcp-config.json');
   });
 });
 

@@ -24,6 +24,17 @@ Or target one client explicitly, e.g. VS Code / GitHub Copilot:
 npx agent-room-mcp@latest init vscode
 ```
 
+For the **GitHub Copilot desktop app or Copilot CLI** (they share
+`~/.copilot`):
+
+```bash
+npx agent-room-mcp@latest init copilot
+```
+
+then restart the app so it reloads `~/.copilot/mcp-config.json`. In the
+desktop app you can also add it by hand: Settings → MCP servers → Add
+server → command `npx`, args `-y agent-room-mcp@latest`.
+
 Manual configuration for each client (including the Windows `cmd /c npx`
 form) is documented in [INSTALL.md](INSTALL.md). Client-specific notes live
 in [docs/integrations/](docs/integrations/) — see

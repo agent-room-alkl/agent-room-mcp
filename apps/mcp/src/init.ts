@@ -102,7 +102,7 @@ interface InstallResult {
   unchanged: string[];
 }
 
-export type InstallTarget = 'claude' | 'cursor' | 'codex' | 'antigravity' | 'vscode';
+export type InstallTarget = 'claude' | 'cursor' | 'codex' | 'antigravity' | 'vscode' | 'copilot';
 
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
@@ -313,6 +313,15 @@ export async function detectInstallTargets(opts: DetectInstallTargetsOptions = {
     found.push('vscode');
   }
 
+  // GitHub Copilot desktop app / CLI — COPILOT_HOME dir (default ~/.copilot)
+  // or the `copilot` CLI on PATH.
+  if (
+    (await whichCmd('copilot')) ||
+    (await exists(env.COPILOT_HOME ?? join(home, '.copilot')))
+  ) {
+    found.push('copilot');
+  }
+
   return found;
 }
 
@@ -500,6 +509,31 @@ async function installVscode(): Promise<InstallResult> {
   const before = JSON.stringify(servers['agent-room']);
   servers['agent-room'] = entry;
   data.servers = servers;
+  if (JSON.stringify(servers['agent-room']) !== before) {
+    await writeJsonAtomic(path, data);
+    return { changes: [`wrote ${path} (agent-room MCP server)`], unchanged: [] };
+  }
+  return { changes: [], unchanged: [`${path} (already configured)`] };
+}
+
+// GitHub Copilot desktop app + Copilot CLI share COPILOT_HOME (default
+// ~/.copilot) and read MCP servers from mcp-config.json there, under a
+// top-level `mcpServers` key. Docs:
+// https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers
+export function copilotMcpConfigPathFor(home: string, copilotHome?: string): string {
+  return join(copilotHome ?? join(home, '.copilot'), 'mcp-config.json');
+}
+
+async function installCopilot(): Promise<InstallResult> {
+  const path = copilotMcpConfigPathFor(homedir(), process.env.COPILOT_HOME);
+  const data = (await readJson(path)) ?? {};
+  const servers = ((data.mcpServers as Record<string, unknown>) ?? {});
+  const entry = process.platform === 'win32'
+    ? { type: 'stdio', command: 'cmd', args: ['/c', 'npx', '-y', 'agent-room-mcp@latest'], env: { GITHUB_COPILOT: '1' } }
+    : { type: 'stdio', command: 'npx', args: ['-y', 'agent-room-mcp@latest'], env: { GITHUB_COPILOT: '1' } };
+  const before = JSON.stringify(servers['agent-room']);
+  servers['agent-room'] = entry;
+  data.mcpServers = servers;
   if (JSON.stringify(servers['agent-room']) !== before) {
     await writeJsonAtomic(path, data);
     return { changes: [`wrote ${path} (agent-room MCP server)`], unchanged: [] };
@@ -705,6 +739,7 @@ function targetLabel(target: InstallTarget): string {
     target === 'cursor' ? 'Cursor' :
     target === 'codex' ? 'Codex' :
     target === 'vscode' ? 'VS Code (GitHub Copilot)' :
+    target === 'copilot' ? 'GitHub Copilot app/CLI' :
     'Antigravity'
   );
 }
@@ -746,6 +781,12 @@ async function installTarget(target: InstallTarget, opts: { hooks: boolean }): P
   if (target === 'vscode') {
     const result = await installVscode();
     reportResult('VS Code', result);
+    return;
+  }
+
+  if (target === 'copilot') {
+    const result = await installCopilot();
+    reportResult('GitHub Copilot app/CLI', result);
     return;
   }
 
@@ -817,9 +858,18 @@ export async function runInit(argv: string[]): Promise<void> {
     return;
   }
 
-  if (target === 'vscode' || target === 'copilot') {
+  if (target === 'vscode') {
     await installTarget('vscode', { hooks: !noHooks });
     nextSteps('VS Code');
+    return;
+  }
+
+  // The GitHub Copilot desktop app and Copilot CLI share ~/.copilot; both
+  // read mcp-config.json there. `init copilot` targets them — VS Code's
+  // Copilot extension is the separate `init vscode` target.
+  if (target === 'copilot' || target === 'copilot-app' || target === 'copilot-cli') {
+    await installTarget('copilot', { hooks: !noHooks });
+    nextSteps('GitHub Copilot (restart the app so it reloads mcp-config.json)');
     return;
   }
 
