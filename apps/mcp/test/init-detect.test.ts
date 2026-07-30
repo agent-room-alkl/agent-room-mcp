@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { detectInstallTargets, readJson, vscodeMcpPathFor } from '../src/init.js';
 
+// node:path joins with backslashes on Windows, so fixture paths and
+// assertions normalize separators to keep this suite platform-agnostic.
+const norm = (p: string) => p.replace(/\\/g, '/');
+
 function detector(paths: string[], bins: string[] = []) {
   const pathSet = new Set(paths);
   const binSet = new Set(bins);
@@ -12,7 +16,7 @@ function detector(paths: string[], bins: string[] = []) {
     platform: 'linux',
     env: {},
     whichCmd: async (cmd) => (binSet.has(cmd) ? `/usr/bin/${cmd}` : null),
-    pathExistsFn: async (path) => pathSet.has(path),
+    pathExistsFn: async (path) => pathSet.has(norm(path)),
   });
 }
 
@@ -58,12 +62,14 @@ describe('detectInstallTargets', () => {
 
 describe('vscodeMcpPathFor', () => {
   it('uses the user-level mcp.json path on each platform', () => {
-    expect(vscodeMcpPathFor('/Users/agent', 'darwin')).toBe(
+    expect(norm(vscodeMcpPathFor('/Users/agent', 'darwin'))).toBe(
       '/Users/agent/Library/Application Support/Code/User/mcp.json',
     );
-    expect(vscodeMcpPathFor('/home/agent', 'linux')).toBe('/home/agent/.config/Code/User/mcp.json');
-    expect(vscodeMcpPathFor('/Users/agent', 'win32', 'C:\\Users\\agent\\AppData\\Roaming')).toBe(
-      'C:\\Users\\agent\\AppData\\Roaming/Code/User/mcp.json',
+    expect(norm(vscodeMcpPathFor('/home/agent', 'linux'))).toBe(
+      '/home/agent/.config/Code/User/mcp.json',
+    );
+    expect(norm(vscodeMcpPathFor('/Users/agent', 'win32', 'C:\\Users\\agent\\AppData\\Roaming'))).toBe(
+      'C:/Users/agent/AppData/Roaming/Code/User/mcp.json',
     );
   });
 });

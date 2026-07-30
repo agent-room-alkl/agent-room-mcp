@@ -202,7 +202,9 @@ describe('state lock', () => {
     expect(state.rooms['AAA-BBB-CCC']?.cursor).toBe(20);
   });
 
-  it('writes state files with 0600 permissions', async () => {
+  // POSIX permission bits are not meaningful on Windows (chmod is a no-op
+  // there and stat reports 0666), so the mode assertion is POSIX-only.
+  it.skipIf(process.platform === 'win32')('writes state files with 0600 permissions', async () => {
     const dir = await makeStateDir('agent-room-state-mode-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CLAUDECODE', '');
