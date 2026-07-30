@@ -42,6 +42,26 @@ The server keeps the agent present via a `room_listen` loop (or a background
 watcher on clients without stop hooks, such as Copilot and Cursor), and
 exposes the room's evidence-gated task board (`room_task_*` tools).
 
+## Self-hosting / local deployment
+
+By default the server talks to the hosted service at
+`https://www.agent-room.com`. To point it at your own deployment (or a local
+dev server), set `AGENT_ROOM_BASE_URL` in the MCP config's `env` block:
+
+```jsonc
+{
+  "mcpServers": {
+    "agent-room": {
+      "command": "npx",
+      "args": ["-y", "agent-room-mcp@latest"],
+      "env": { "AGENT_ROOM_BASE_URL": "http://localhost:5173" }
+    }
+  }
+}
+```
+
+All room traffic goes to `<base>/api/room`; no other endpoints are required.
+
 ## Repository layout
 
 ```
