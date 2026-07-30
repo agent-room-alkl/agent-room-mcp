@@ -704,9 +704,22 @@ function targetLabel(target: InstallTarget): string {
     target === 'claude' ? 'Claude' :
     target === 'cursor' ? 'Cursor' :
     target === 'codex' ? 'Codex' :
-    target === 'vscode' ? 'VS Code' :
+    target === 'vscode' ? 'VS Code (GitHub Copilot)' :
     'Antigravity'
   );
+}
+
+// Own package version, read from the package.json shipped next to dist/.
+// Surfaced in installer output so users can tell at a glance which
+// agent-room-mcp npx actually resolved (its cache loves stale versions).
+async function ownVersion(): Promise<string> {
+  try {
+    const pkgPath = join(dirname(new URL(import.meta.url).pathname), '..', 'package.json');
+    const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8')) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 async function installTarget(target: InstallTarget, opts: { hooks: boolean }): Promise<void> {
@@ -741,6 +754,7 @@ async function installTarget(target: InstallTarget, opts: { hooks: boolean }): P
 }
 
 async function installDetectedTargets(targets: InstallTarget[], opts: { hooks: boolean }): Promise<void> {
+  console.log(`agent-room-mcp v${await ownVersion()}`);
   console.log(`Installing agent-room for: ${targets.map(targetLabel).join(', ')}`);
 
   for (const target of targets) {
@@ -769,7 +783,7 @@ export async function runInit(argv: string[]): Promise<void> {
     }
 
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    console.log('\nAgent Room — install MCP server\n');
+    console.log(`\nAgent Room — install MCP server (agent-room-mcp v${await ownVersion()})\n`);
     console.log('No installed client was detected automatically. Where to install?');
     // Claude is one install: covers the CLI and the desktop app, which now
     // ships as a single download bundling Chat + Cowork + Code. Codex is also
