@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { copilotMcpConfigPathFor, detectInstallTargets, readJson, vscodeMcpPathFor } from '../src/init.js';
+import { copilotMcpConfigPathFor, detectInstallTargets, ownVersion, readJson, vscodeMcpPathFor } from '../src/init.js';
 
 // node:path joins with backslashes on Windows, so fixture paths and
 // assertions normalize separators to keep this suite platform-agnostic.
@@ -117,5 +117,13 @@ describe('readJson', () => {
     await expect(readJson(path)).resolves.toEqual({
       mcpServers: { 'agent-room': { url: 'https://www.agent-room.com/mcp' } },
     });
+  });
+});
+
+describe('ownVersion', () => {
+  it('reads the package version via fileURLToPath (Windows-safe)', async () => {
+    const v = await ownVersion();
+    expect(v).toMatch(/^\d+\.\d+\.\d+/);
+    expect(v).not.toBe('unknown');
   });
 });

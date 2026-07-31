@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const MCP_ENTRY = {
   command: 'npx',
@@ -805,6 +806,19 @@ async function installDetectedTargets(targets: InstallTarget[], opts: { hooks: b
   }
 
   nextSteps(targets.map(targetLabel).join(' / '));
+}
+
+/** Resolve this package's version for the install banner. Uses fileURLToPath
+ *  so Windows paths work (URL.pathname alone yields `/C:/...` which fails). */
+export async function ownVersion(): Promise<string> {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const text = (await fs.readFile(pkgPath, 'utf8')).replace(/^\uFEFF/, '');
+    const pkg = JSON.parse(text) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 export async function runInit(argv: string[]): Promise<void> {
