@@ -26,6 +26,7 @@ import {
   submitTask,
   verifyTask,
   reassignTaskRoles,
+  cancelTask,
   HostNameTakenError,
   MutedError,
   NotYourTurnError,
@@ -127,6 +128,7 @@ export const CANONICAL_NAME: Record<string, string> = {
   room_task_submit: 'room_task',
   room_task_verify: 'room_task',
   room_task_reassign: 'room_task',
+  room_task_cancel: 'room_task',
 };
 
 // toLegacyCall: consolidated call -> the legacy branch + args the dispatcher
@@ -148,7 +150,7 @@ export function toLegacyCall(name: string, a: Record<string, any>): { name: stri
   }
   if (name === 'room_task') {
     const action = String(a.action ?? '');
-    const known = new Set(['list', 'create', 'claim', 'submit', 'verify', 'reassign']);
+    const known = new Set(['list', 'create', 'claim', 'submit', 'verify', 'reassign', 'cancel']);
     if (known.has(action)) {
       const { action: _action, ...rest } = a;
       return { name: `room_task_${action}`, args: rest };
@@ -307,7 +309,7 @@ export function buildTaskBoardHint(board: TaskBoard | null, replyMode?: ReplyMod
     if (!taskBoardMode) return '';
     return '\n\nTASK BOARD — EMPTY. The humans in this room track progress ONLY through the task board; work assigned in chat prose is invisible to them. If you are assigning, accepting, or starting real work, put it on the board NOW: room_task action:"create" (title + owner + a different verifier + a concrete done-when), then action:"claim" before you start. The moderator/lead owns keeping this board populated.';
   }
-  const open = board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected').length;
+  const open = board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected' && t.state !== 'cancelled').length;
   return `\n\nTASK BOARD — ${board.tasks.length} task(s), ${open} open. Work only on the task you've claimed and stay on the list; a task is "done" only when its verifier rules, not when you say so. If you're doing something not on the board, claim/ create a task for it first.\n${summarizeBoard(board)}`;
 }
 
@@ -758,15 +760,15 @@ export function registerTools(server: Server) {
         description:
           'Evidence-gated task board, one tool for all actions. list → read the board. create → add a task (owner + a DIFFERENT verifier + definition-of-done). claim → take a task. ' +
           'submit → hand in with PROOF (real command output; goes to awaiting_review, never straight to done). verify → the designated verifier rules done/rejected (never your own task). ' +
-          'reassign → host/moderator/lead moves owner/verifier.',
+          'reassign → host/moderator/lead moves owner/verifier. cancel → host/moderator/lead archives todo/in_progress tasks to the cancelled lane (no hard delete).',
         inputSchema: {
           type: 'object',
           required: ['code', 'action'],
           properties: {
             code: { type: 'string', description: 'Room code' },
-            action: { type: 'string', enum: ['list', 'create', 'claim', 'submit', 'verify', 'reassign'], description: 'What to do' },
+            action: { type: 'string', enum: ['list', 'create', 'claim', 'submit', 'verify', 'reassign', 'cancel'], description: 'What to do' },
             name: { type: 'string', description: 'Your display name (required for everything except list)' },
-            id: { type: 'string', description: 'Task id, e.g. "T-01" (claim/submit/verify/reassign; optional explicit id on create)' },
+            id: { type: 'string', description: 'Task id, e.g. "T-01" (claim/submit/verify/reassign/cancel; optional explicit id on create)' },
             title: { type: 'string', description: 'create: short task title' },
             owner: { type: 'string', description: 'create/reassign: producer display name' },
             ownerClient: { type: 'string', enum: ['web', 'cc'], description: 'create/reassign: producer client kind (default cc)' },
@@ -779,6 +781,7 @@ export function registerTools(server: Server) {
             exitCode: { type: 'number', description: 'submit: exit code of the run (0 = pass)' },
             verdict: { type: 'string', enum: ['done', 'rejected'], description: 'verify: your ruling' },
             note: { type: 'string', description: 'verify: reasoning / what to fix (optional)' },
+            reason: { type: 'string', description: 'cancel: optional reason shown in the cancelled lane' },
           },
         },
       },
@@ -1776,6 +1779,25 @@ export function registerTools(server: Server) {
       }
     }
 
+
+    if (name === 'room_task_cancel') {
+      try {
+        const { board, task } = await cancelTask(
+          client, a.code, a.id, a.name, 'cc', await readHostKey(a.code), a.reason,
+        );
+        return ok({
+          ok: true,
+          code: a.code,
+          task,
+          board,
+          hint: `${task.id} "${task.title}" archived to cancelled${task.cancellation?.reason ? ` — ${task.cancellation.reason}` : ''}.`,
+        });
+      } catch (e) {
+        return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message });
+      }
+    }
+
     throw new Error(`Unknown tool: ${name}`);
+
   });
 }

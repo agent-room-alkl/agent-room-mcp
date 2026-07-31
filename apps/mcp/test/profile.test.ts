@@ -94,6 +94,8 @@ describe('toLegacyCall translation', () => {
 
     expect(toLegacyCall('room_task', { code: 'C', action: 'claim', name: 'A', id: 'T-01' }))
       .toEqual({ name: 'room_task_claim', args: { code: 'C', name: 'A', id: 'T-01' } });
+    expect(toLegacyCall('room_task', { code: 'C', action: 'cancel', name: 'A', id: 'T-01', reason: 'dup' }))
+      .toEqual({ name: 'room_task_cancel', args: { code: 'C', name: 'A', id: 'T-01', reason: 'dup' } });
 
     expect(toLegacyCall('room_admin', { code: 'C', name: 'A', action: 'reactivate' }))
       .toEqual({ name: 'room_reactivate', args: { code: 'C', name: 'A' } });
@@ -118,5 +120,24 @@ describe('toLegacyCall translation', () => {
     for (const c of canonicals) {
       expect(['room_send', 'room_listen', 'room_minutes', 'room_watch', 'room_admin', 'room_task']).toContain(c);
     }
+  });
+
+  it('aliases room_task_cancel onto the canonical room_task tool', () => {
+    expect(CANONICAL_NAME.room_task_cancel).toBe('room_task');
+  });
+});
+
+describe('room_task cancel schema', () => {
+  it('ListTools room_task action enum includes cancel and reason', async () => {
+    const { server, handlers } = captureHandlers();
+    registerTools(server);
+    const { tools } = await handlers.get(ListToolsRequestSchema)!({});
+    const roomTask = tools.find((t: { name: string }) => t.name === 'room_task');
+    expect(roomTask).toBeTruthy();
+    const action = roomTask.inputSchema.properties.action;
+    expect(action.enum).toContain('cancel');
+    expect(roomTask.inputSchema.properties.reason).toBeTruthy();
+    expect(roomTask.description.toLowerCase()).toContain('cancel');
+    expect(tools.map((t: { name: string }) => t.name)).not.toContain('room_task_cancel');
   });
 });
