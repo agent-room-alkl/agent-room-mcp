@@ -737,7 +737,7 @@ export function agentBlocks(board: TaskBoard, name: string): number {
  * reopened), so it is excluded alongside `done`.
  */
 export function openTasks(board: TaskBoard): Task[] {
-  return board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected');
+  return board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected' && t.state !== 'cancelled');
 }
 
 /**
@@ -795,10 +795,11 @@ export function boardDeliveredSection(board: TaskBoard | null | undefined): stri
 // collapse to a single trailing "✅ N done" line.
 export function summarizeBoard(board: TaskBoard): string {
   const icon: Record<TaskState, string> = {
-    todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', done: '✅', rejected: '🔴',
+    todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', done: '✅', rejected: '🔴', cancelled: '🗑️',
   };
   const open = openTasks(board);
   const rejected = board.tasks.filter(t => t.state === 'rejected');
+  const cancelled = board.tasks.filter(t => t.state === 'cancelled');
   const doneCount = board.tasks.filter(t => t.state === 'done').length;
   const lines = [
     ...open.map(
@@ -808,6 +809,12 @@ export function summarizeBoard(board: TaskBoard): string {
       const note = t.verdict?.note?.trim();
       const noteSuffix = note ? `: ${note.slice(0, 80)}` : '';
       return `${icon.rejected} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — rejected${noteSuffix}`;
+    }),
+    ...cancelled.map(t => {
+      const reason = t.cancellation?.reason?.trim();
+      const reasonSuffix = reason ? `: ${reason.slice(0, 80)}` : '';
+      const by = t.cancellation?.by ? ` by @${t.cancellation.by}` : '';
+      return `${icon.cancelled} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — cancelled${by}${reasonSuffix}`;
     }),
   ];
   if (doneCount > 0) lines.push(`✅ ${doneCount} done`);
