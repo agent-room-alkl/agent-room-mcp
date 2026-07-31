@@ -750,10 +750,11 @@ function targetLabel(target: InstallTarget): string {
 // Own package version, read from the package.json shipped next to dist/.
 // Surfaced in installer output so users can tell at a glance which
 // agent-room-mcp npx actually resolved (its cache loves stale versions).
-async function ownVersion(): Promise<string> {
+export async function ownVersion(): Promise<string> {
   try {
-    const pkgPath = join(dirname(new URL(import.meta.url).pathname), '..', 'package.json');
-    const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8')) as { version?: string };
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const text = (await fs.readFile(pkgPath, 'utf8')).replace(/^\uFEFF+/, '');
+    const pkg = JSON.parse(text) as { version?: string };
     return pkg.version ?? 'unknown';
   } catch {
     return 'unknown';
@@ -806,19 +807,6 @@ async function installDetectedTargets(targets: InstallTarget[], opts: { hooks: b
   }
 
   nextSteps(targets.map(targetLabel).join(' / '));
-}
-
-/** Resolve this package's version for the install banner. Uses fileURLToPath
- *  so Windows paths work (URL.pathname alone yields `/C:/...` which fails). */
-export async function ownVersion(): Promise<string> {
-  try {
-    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
-    const text = (await fs.readFile(pkgPath, 'utf8')).replace(/^\uFEFF+/, '');
-    const pkg = JSON.parse(text) as { version?: string };
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
 }
 
 export async function runInit(argv: string[]): Promise<void> {
