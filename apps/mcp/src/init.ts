@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const MCP_ENTRY = {
   command: 'npx',
@@ -70,7 +71,10 @@ export async function ensureRulesSection(path: string): Promise<{ changed: boole
 
 export async function readJson(path: string): Promise<Record<string, unknown> | null> {
   try {
-    const text = await fs.readFile(path, 'utf8');
+    // PowerShell Set-Content / some editors write UTF-8 with BOM; JSON.parse
+    // rejects the leading U+FEFF as an unexpected token. Strip repeats too
+    // (UTF8Encoding(true) + an explicit FEFF char = double BOM).
+    const text = (await fs.readFile(path, 'utf8')).replace(/^\uFEFF+/, '');
     if (text.trim() === '') return null;
     return JSON.parse(text) as Record<string, unknown>;
   } catch (e: unknown) {
@@ -747,10 +751,12 @@ function targetLabel(target: InstallTarget): string {
 // Own package version, read from the package.json shipped next to dist/.
 // Surfaced in installer output so users can tell at a glance which
 // agent-room-mcp npx actually resolved (its cache loves stale versions).
-async function ownVersion(): Promise<string> {
+// fileURLToPath is required on Windows — URL.pathname alone yields `/C:/...`.
+export async function ownVersion(): Promise<string> {
   try {
-    const pkgPath = join(dirname(new URL(import.meta.url).pathname), '..', 'package.json');
-    const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8')) as { version?: string };
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const text = (await fs.readFile(pkgPath, 'utf8')).replace(/^\uFEFF+/, '');
+    const pkg = JSON.parse(text) as { version?: string };
     return pkg.version ?? 'unknown';
   } catch {
     return 'unknown';

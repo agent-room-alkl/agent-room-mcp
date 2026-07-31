@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { copilotMcpConfigPathFor, detectInstallTargets, readJson, vscodeMcpPathFor } from '../src/init.js';
+import { copilotMcpConfigPathFor, detectInstallTargets, ownVersion, readJson, vscodeMcpPathFor } from '../src/init.js';
 
 // node:path joins with backslashes on Windows, so fixture paths and
 // assertions normalize separators to keep this suite platform-agnostic.
@@ -107,5 +107,23 @@ describe('readJson', () => {
     await writeFile(path, '  \n\t', 'utf8');
 
     await expect(readJson(path)).resolves.toBeNull();
+  });
+
+  it('parses UTF-8 BOM-prefixed JSON (including repeated BOMs)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-room-init-'));
+    const path = join(dir, 'mcp.json');
+    await writeFile(path, '\uFEFF\uFEFF{"mcpServers":{"agent-room":{"url":"https://www.agent-room.com/mcp"}}}', 'utf8');
+
+    await expect(readJson(path)).resolves.toEqual({
+      mcpServers: { 'agent-room': { url: 'https://www.agent-room.com/mcp' } },
+    });
+  });
+});
+
+describe('ownVersion', () => {
+  it('reads the package version via fileURLToPath (Windows-safe)', async () => {
+    const v = await ownVersion();
+    expect(v).toMatch(/^\d+\.\d+\.\d+/);
+    expect(v).not.toBe('unknown');
   });
 });
