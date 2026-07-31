@@ -73,7 +73,7 @@ export async function readJson(path: string): Promise<Record<string, unknown> | 
   try {
     // PowerShell Set-Content / some editors write UTF-8 with BOM; JSON.parse
     // rejects the leading U+FEFF as an unexpected token.
-    const text = (await fs.readFile(path, 'utf8')).replace(/^\uFEFF/, '');
+    const text = (await fs.readFile(path, 'utf8')).replace(/^\uFEFF+/, '');
     if (text.trim() === '') return null;
     return JSON.parse(text) as Record<string, unknown>;
   } catch (e: unknown) {
@@ -813,7 +813,7 @@ async function installDetectedTargets(targets: InstallTarget[], opts: { hooks: b
 export async function ownVersion(): Promise<string> {
   try {
     const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
-    const text = (await fs.readFile(pkgPath, 'utf8')).replace(/^\uFEFF/, '');
+    const text = (await fs.readFile(pkgPath, 'utf8')).replace(/^\uFEFF+/, '');
     const pkg = JSON.parse(text) as { version?: string };
     return pkg.version ?? 'unknown';
   } catch {
