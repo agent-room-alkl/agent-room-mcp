@@ -381,3 +381,20 @@ export async function reassignTaskRoles(
     action: 'taskReassign', code, id, requesterName, requesterClient, hostKey, ...patch,
   });
 }
+
+// Archive a task to the cancelled lane. Gated server-side: host/moderator/lead
+// only; rejects done/awaiting_review tasks and tasks with submitted evidence.
+export async function cancelTask(
+  client: RoomApiClient,
+  code: string,
+  id: string,
+  requesterName: string,
+  requesterClient: ClientKind,
+  hostKey?: string,
+  reason?: string,
+): Promise<{ board: TaskBoard; task: Task }> {
+  return client.post<{ board: TaskBoard; task: Task }>({
+    action: 'taskCancel', code, id, requesterName, requesterClient, hostKey, reason,
+  });
+}
+

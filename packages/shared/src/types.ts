@@ -315,6 +315,7 @@ export interface RoomArtifact {
 //   awaiting_review ~ (Agent Room-specific evidence gate; no direct A2A state)
 //   done            ~ completed
 //   rejected        ~ rejected  (terminal disposition; reopen only via host/update)
+//   cancelled       ~ archived by host/moderator; terminal history, not open work
 // A2A's `input-required` maps to our host/moderator answering the producer in
 // chat rather than a distinct board state.
 export type TaskState =
@@ -322,7 +323,8 @@ export type TaskState =
   | 'in_progress'      // a producer claimed it
   | 'awaiting_review'  // producer submitted evidence; verifier must rule
   | 'done'             // verifier confirmed the evidence
-  | 'rejected';        // verifier rejected; terminal until explicitly reopened
+  | 'rejected'         // verifier rejected; terminal until explicitly reopened
+  | 'cancelled';       // host/moderator archived; terminal, visible history only
 
 // The three-part proof a producer must attach to move a task to
 // 'awaiting_review'. All three text fields must be non-empty.
@@ -342,6 +344,14 @@ export interface TaskVerdict {
   by: string;            // verifier display name
   byClient: ClientKind;
   at: number;            // epoch ms
+}
+
+// Host/moderator archive record when a task is moved to 'cancelled'.
+export interface TaskCancellation {
+  by: string;
+  byClient: ClientKind;
+  at: number;            // epoch ms
+  reason?: string;
 }
 
 // A lightweight checklist item under a Task. Subtasks are intentionally NOT
@@ -391,6 +401,7 @@ export interface Task {
   readinessNote?: string;
   evidence?: TaskEvidence; // latest submitted evidence (kept across rejects)
   verdict?: TaskVerdict;   // latest verifier ruling
+  cancellation?: TaskCancellation; // set when archived to 'cancelled'
   // Audit trail of owner/verifier reassignments (host / moderator escape
   // hatch). Optional + append-only, so boards created before this field
   // existed keep working unchanged.
