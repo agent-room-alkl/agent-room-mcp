@@ -70,7 +70,9 @@ export async function ensureRulesSection(path: string): Promise<{ changed: boole
 
 export async function readJson(path: string): Promise<Record<string, unknown> | null> {
   try {
-    const text = await fs.readFile(path, 'utf8');
+    // PowerShell Set-Content / some editors write UTF-8 with BOM; JSON.parse
+    // rejects the leading U+FEFF as an unexpected token.
+    const text = (await fs.readFile(path, 'utf8')).replace(/^\uFEFF/, '');
     if (text.trim() === '') return null;
     return JSON.parse(text) as Record<string, unknown>;
   } catch (e: unknown) {

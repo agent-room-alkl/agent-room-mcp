@@ -108,4 +108,14 @@ describe('readJson', () => {
 
     await expect(readJson(path)).resolves.toBeNull();
   });
+
+  it('parses UTF-8 BOM-prefixed JSON written by PowerShell/editors', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-room-init-'));
+    const path = join(dir, 'mcp.json');
+    await writeFile(path, '\uFEFF{"mcpServers":{"agent-room":{"url":"https://www.agent-room.com/mcp"}}}', 'utf8');
+
+    await expect(readJson(path)).resolves.toEqual({
+      mcpServers: { 'agent-room': { url: 'https://www.agent-room.com/mcp' } },
+    });
+  });
 });
