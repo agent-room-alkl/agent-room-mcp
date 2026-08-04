@@ -34,6 +34,22 @@ export interface RoomState {
   // it, joinRoom rejects with HostNameTakenError. Plain text on disk under
   // ~/.agent-room/ — same trust level as the MCP state itself.
   hostKey?: string;
+  // Codex `session_id` / Cursor `conversation_id` that owns this join.
+  // Shared harness state (`state-harness-codex.json` / `state-harness-cursor.json`)
+  // is otherwise visible to EVERY thread on that harness — without this key,
+  // a Reddit-work Codex chat would keep getting stop-hook room contract
+  // injections for a different thread that joined an Agent Room.
+  sessionKey?: string;
+}
+
+/** True when this room should receive stop-hook keep-alive for `sessionKey`. */
+export function roomBelongsToSession(
+  room: RoomState,
+  sessionKey: string | undefined,
+): boolean {
+  if (!sessionKey) return true; // no session identity available — legacy behaviour
+  if (!room.sessionKey) return true; // unclaimed; caller may claim it
+  return room.sessionKey === sessionKey;
 }
 
 export interface AgentRoomState {
@@ -90,6 +106,7 @@ export function mergeStates(states: AgentRoomState[]): AgentRoomState {
         joinedAt: newest.joinedAt,
         lastSentAt: Math.max(existing.lastSentAt ?? 0, room.lastSentAt ?? 0) || undefined,
         hostKey: newest.hostKey ?? existing.hostKey,
+        sessionKey: newest.sessionKey ?? existing.sessionKey,
       };
     }
   }
@@ -307,5 +324,33 @@ export async function removeRoomEverywhere(code: string): Promise<void> {
       delete state.rooms[code];
       await writeStateFile(file, state);
     }));
+  });
+}
+
+/**
+ * Stamp `sessionKey` onto a room that has none yet (first Stop after join).
+ * Writes across all state files so harness + PPID copies stay aligned.
+ * Returns false if the room is already claimed by a different session.
+ */
+export async function claimRoomSessionEverywhere(
+  code: string,
+  sessionKey: string,
+): Promise<boolean> {
+  return withStateLock(async () => {
+    const files = await listStateFiles();
+    let ok = true;
+    await Promise.all(files.map(async (file) => {
+      const state = await readStateFile(file);
+      const room = state.rooms[code];
+      if (!room) return;
+      if (room.sessionKey && room.sessionKey !== sessionKey) {
+        ok = false;
+        return;
+      }
+      if (room.sessionKey === sessionKey) return;
+      room.sessionKey = sessionKey;
+      await writeStateFile(file, state);
+    }));
+    return ok;
   });
 }

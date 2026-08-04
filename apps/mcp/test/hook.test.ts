@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { classifyHookInput } from '../src/hook.js';
+import { classifyHookInput, resolveHookSessionKey } from '../src/hook.js';
+import { roomBelongsToSession } from '../src/state.js';
 
 describe('classifyHookInput', () => {
   it('detects Cursor stop payloads without hook_event_name', () => {
@@ -29,5 +30,43 @@ describe('classifyHookInput', () => {
 
   it('ignores empty hook payloads', () => {
     expect(classifyHookInput({})).toBeNull();
+  });
+});
+
+describe('resolveHookSessionKey', () => {
+  it('prefers Codex session_id over Cursor conversation_id', () => {
+    expect(resolveHookSessionKey({
+      session_id: 'codex-sess',
+      conversation_id: 'cursor-conv',
+    })).toBe('codex-sess');
+  });
+
+  it('falls back to Cursor conversation_id', () => {
+    expect(resolveHookSessionKey({ conversation_id: ' cursor-conv ' })).toBe('cursor-conv');
+  });
+
+  it('returns undefined when neither is present', () => {
+    expect(resolveHookSessionKey({})).toBeUndefined();
+  });
+});
+
+describe('roomBelongsToSession', () => {
+  const base = { name: 'Antigravity', cursor: 1, joinedAt: 1 };
+
+  it('allows all rooms when the hook has no session identity (legacy)', () => {
+    expect(roomBelongsToSession(base, undefined)).toBe(true);
+    expect(roomBelongsToSession({ ...base, sessionKey: 'other' }, undefined)).toBe(true);
+  });
+
+  it('allows unclaimed rooms (caller may claim)', () => {
+    expect(roomBelongsToSession(base, 'sess-a')).toBe(true);
+  });
+
+  it('allows rooms claimed by this session', () => {
+    expect(roomBelongsToSession({ ...base, sessionKey: 'sess-a' }, 'sess-a')).toBe(true);
+  });
+
+  it('rejects rooms claimed by a different session', () => {
+    expect(roomBelongsToSession({ ...base, sessionKey: 'sess-a' }, 'sess-b')).toBe(false);
   });
 });
