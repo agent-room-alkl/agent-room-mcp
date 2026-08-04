@@ -11,6 +11,8 @@ import {
   resetBlockStreakEverywhere,
   removeRoom,
   removeRoomEverywhere,
+  claimRoomSessionEverywhere,
+  roomBelongsToSession,
 } from './state.js';
 import { detectHarness } from './harness.js';
 
@@ -55,10 +57,21 @@ interface HookInput {
   // Claude Code / Codex
   hook_event_name?: string;
   stop_hook_active?: boolean;
+  // Codex common field — unique per chat thread.
+  session_id?: string;
   // Cursor 1.7+ stop hook
   status?: 'completed' | 'aborted' | 'error';
   loop_count?: number;
   conversation_id?: string;
+}
+
+/** Prefer Codex session_id, then Cursor conversation_id. */
+export function resolveHookSessionKey(input: HookInput): string | undefined {
+  const sessionId = typeof input.session_id === 'string' ? input.session_id.trim() : '';
+  if (sessionId) return sessionId;
+  const conversationId = typeof input.conversation_id === 'string' ? input.conversation_id.trim() : '';
+  if (conversationId) return conversationId;
+  return undefined;
 }
 
 function isCursorStopInput(input: HookInput): boolean {
@@ -95,7 +108,7 @@ async function readHookState(scope: StateScope) {
   return scope === 'harness' ? readHarnessStateOrMerged() : readState();
 }
 
-async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
+async function fetchPending(scope: StateScope, sessionKey?: string): Promise<PendingRoom[]> {
   const state = await readHookState(scope);
   const codes = Object.keys(state.rooms);
   if (codes.length === 0) return [];
@@ -105,6 +118,14 @@ async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
 
   for (const code of codes) {
     const entry = state.rooms[code]!;
+    if (!roomBelongsToSession(entry, sessionKey)) continue;
+    // First Stop after join: claim unscoped rooms for this session so other
+    // Codex/Cursor threads stop seeing them.
+    if (sessionKey && !entry.sessionKey) {
+      const claimed = await claimRoomSessionEverywhere(code, sessionKey);
+      if (!claimed) continue;
+      entry.sessionKey = sessionKey;
+    }
     let msgs: Message[];
     try {
       msgs = await listMessages(client, code, entry.cursor);
@@ -204,6 +225,7 @@ export async function runHook(): Promise<void> {
     process.exit(0);
   }
   const { event, cursorMode } = classified;
+  const sessionKey = resolveHookSessionKey(input);
   // Cursor and Codex may start the MCP server and Stop hook under different
   // wrapper processes, so their PPID-scoped state files do not always match.
   // Those hooks read a stable harness state file first and fall back to merged
@@ -246,7 +268,7 @@ export async function runHook(): Promise<void> {
 
   let pending: PendingRoom[];
   try {
-    pending = await fetchPending(stateScope);
+    pending = await fetchPending(stateScope, sessionKey);
   } catch {
     process.exit(0);
   }
@@ -261,7 +283,7 @@ export async function runHook(): Promise<void> {
   // turn ended — and any later web user reply would be missed.
   if (withMessages.length === 0 && event === 'Stop') {
     const state = await readHookState(stateScope);
-    const hasActiveRoom = Object.keys(state.rooms).length > 0;
+    const hasActiveRoom = Object.values(state.rooms).some((r) => roomBelongsToSession(r, sessionKey));
     if (hasActiveRoom) {
       const deadline = Date.now() + POLL_MAX_MS;
       // Ease 1.5s -> 5s across the window: the first replies usually land
@@ -272,7 +294,7 @@ export async function runHook(): Promise<void> {
         await sleep(pollDelay);
         pollDelay = Math.min(Math.floor(pollDelay * 1.5), 5_000);
         let p: PendingRoom[];
-        try { p = await fetchPending(stateScope); }
+        try { p = await fetchPending(stateScope, sessionKey); }
         catch { break; }
         const got = p.filter((r) => r.messages.length > 0);
         await commitCursors(p, stateScope);
@@ -318,6 +340,12 @@ export async function runHook(): Promise<void> {
       // entry would keep the Stop hook looping "call room_listen" forever
       // after the meeting closes — Codex caught this in 0.12.0 review.
       for (const [code, r] of Object.entries(state.rooms)) {
+        if (!roomBelongsToSession(r, sessionKey)) continue;
+        if (sessionKey && !r.sessionKey) {
+          const claimed = await claimRoomSessionEverywhere(code, sessionKey);
+          if (!claimed) continue;
+          r.sessionKey = sessionKey;
+        }
         try {
           const room = await getRoom(apiClient, code);
           const stillIn = room.participants.some(p => p.name === r.name && p.client === 'cc');
