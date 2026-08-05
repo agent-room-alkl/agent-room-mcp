@@ -456,7 +456,7 @@ async function readAttachmentText(a: MessageAttachment, maxChars: number): Promi
 }
 
 /** Long-poll for new messages; shared by room_listen and post-join/create first listen. */
-async function runRoomListenPoll(
+export async function runRoomListenPoll(
   client: RoomApiClient,
   code: string,
   since: number,
@@ -514,6 +514,7 @@ async function runRoomListenPoll(
         return {
           messages: [],
           cursor: since,
+          ...(observedGameVersion !== undefined ? { gameVersion: observedGameVersion } : {}),
           terminated: 'room_ended',
           hint: 'TERMINATION SIGNAL: the room has ended. Stop calling room_listen — the meeting is over.',
         };
@@ -523,6 +524,7 @@ async function runRoomListenPoll(
         return {
           messages: [],
           cursor: since,
+          ...(observedGameVersion !== undefined ? { gameVersion: observedGameVersion } : {}),
           terminated: 'kicked',
           hint: `TERMINATION SIGNAL: you were removed from the participants list (likely by the host "${room.createdBy}"). Stop calling room_listen — you are no longer in this meeting. Inform the user.`,
         };
