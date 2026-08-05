@@ -53,9 +53,17 @@ describe('resolveHookSessionKey', () => {
 describe('roomBelongsToSession', () => {
   const base = { name: 'Antigravity', cursor: 1, joinedAt: 1 };
 
-  it('allows all rooms when the hook has no session identity (legacy)', () => {
+  it('allows unclaimed rooms when the hook has no session identity (legacy)', () => {
     expect(roomBelongsToSession(base, undefined)).toBe(true);
-    expect(roomBelongsToSession({ ...base, sessionKey: 'other' }, undefined)).toBe(true);
+  });
+
+  // The regression that shipped in 0.26.6: a Codex Stop payload with no
+  // session_id resolved to undefined and took the "legacy" path, so an
+  // unrelated Codex thread kept receiving the room contract for a room another
+  // session had already claimed. A claimed room + an anonymous caller must
+  // fail closed.
+  it('rejects a claimed room when the hook has no session identity', () => {
+    expect(roomBelongsToSession({ ...base, sessionKey: 'other' }, undefined)).toBe(false);
   });
 
   it('allows unclaimed rooms (caller may claim)', () => {

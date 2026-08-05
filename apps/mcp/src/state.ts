@@ -42,13 +42,27 @@ export interface RoomState {
   sessionKey?: string;
 }
 
-/** True when this room should receive stop-hook keep-alive for `sessionKey`. */
+/**
+ * True when this room should receive stop-hook keep-alive for `sessionKey`.
+ *
+ * Order matters, and it must fail CLOSED once a room has an owner. The first
+ * cut of this checked `!sessionKey` first and returned true — "legacy
+ * behaviour" — which reopened the exact hole the session key exists to close:
+ * a Codex Stop payload that carries no `session_id` resolves to undefined, so
+ * an unrelated thread (Robin's Reddit chat, 2026-08-05) kept getting the room
+ * contract injected even though the room was demonstrably claimed by another
+ * session. A claimed room plus an anonymous caller is not a legacy setup — it
+ * is precisely the leak.
+ *
+ * Genuinely legacy state (joined before sessionKey existed, so `room.sessionKey`
+ * is unset) still gets the permissive path and stays claimable.
+ */
 export function roomBelongsToSession(
   room: RoomState,
   sessionKey: string | undefined,
 ): boolean {
-  if (!sessionKey) return true; // no session identity available — legacy behaviour
-  if (!room.sessionKey) return true; // unclaimed; caller may claim it
+  if (!room.sessionKey) return true; // unclaimed / pre-sessionKey state; caller may claim it
+  if (!sessionKey) return false; // room has an owner and this caller has no identity — not theirs
   return room.sessionKey === sessionKey;
 }
 
