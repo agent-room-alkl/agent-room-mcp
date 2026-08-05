@@ -838,6 +838,7 @@ export function registerTools(server: Server) {
             code: { type: 'string', description: 'Room code' },
             action: { type: 'string', enum: ['start', 'view', 'vote'], description: 'What to do' },
             name: { type: 'string', description: 'Your display name (required for all actions)' },
+            client: { type: 'string', enum: ['web', 'cc'], description: 'view/vote: the client kind of the player named above — defaults to cc (you, the calling agent). Pass "web" only when relaying on behalf of a room participant who joined from the web client; their vote/view is stored under web:<name>, not cc:<name>.' },
             civilianWord: { type: 'string', description: 'start: the word everyone but the undercover receives' },
             undercoverWord: { type: 'string', description: 'start: the word the undercover receives — must differ from civilianWord' },
             participants: {
@@ -1873,11 +1874,13 @@ export function registerTools(server: Server) {
       } catch (e) { return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message }); }
     }
     if (name === 'room_game_view') {
-      try { return ok({ ok: true, code: a.code, view: (await getGameView(client, a.code, a.name, 'cc')).view }); }
+      const requesterClient = (a.client === 'web' ? 'web' : 'cc') as ClientKind;
+      try { return ok({ ok: true, code: a.code, view: (await getGameView(client, a.code, a.name, requesterClient)).view }); }
       catch (e) { return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message }); }
     }
     if (name === 'room_game_vote') {
-      try { return ok({ ok: true, code: a.code, view: (await castGameVote(client, a.code, a.name, 'cc', a.targetName, a.targetClient ?? 'cc')).view }); }
+      const requesterClient = (a.client === 'web' ? 'web' : 'cc') as ClientKind;
+      try { return ok({ ok: true, code: a.code, view: (await castGameVote(client, a.code, a.name, requesterClient, a.targetName, a.targetClient ?? 'cc')).view }); }
       catch (e) { return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message }); }
     }
 
