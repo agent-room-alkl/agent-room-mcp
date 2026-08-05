@@ -888,7 +888,7 @@ export function registerTools(server: Server) {
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
-      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey });
+      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey, clientKind: harness.kind });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
@@ -998,7 +998,7 @@ export function registerTools(server: Server) {
         } catch { /* greeting is nice-to-have; join/listen must still proceed */ }
       }
       const msgs = await listMessages(client, a.code, 0);
-      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now() });
+      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now(), clientKind: harness.kind });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,

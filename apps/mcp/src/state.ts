@@ -40,6 +40,8 @@ export interface RoomState {
   // a Reddit-work Codex chat would keep getting stop-hook room contract
   // injections for a different thread that joined an Agent Room.
   sessionKey?: string;
+  // Harness client kind (e.g. 'codex', 'cursor', 'antigravity') that joined the room.
+  clientKind?: string;
 }
 
 /**
@@ -61,6 +63,8 @@ export function roomBelongsToSession(
   room: RoomState,
   sessionKey: string | undefined,
 ): boolean {
+  const currentKind = detectHarness().kind;
+  if (room.clientKind && room.clientKind !== currentKind) return false;
   if (!room.sessionKey) return true; // unclaimed / pre-sessionKey state; caller may claim it
   if (!sessionKey) return false; // room has an owner and this caller has no identity — not theirs
   return room.sessionKey === sessionKey;
@@ -121,6 +125,7 @@ export function mergeStates(states: AgentRoomState[]): AgentRoomState {
         lastSentAt: Math.max(existing.lastSentAt ?? 0, room.lastSentAt ?? 0) || undefined,
         hostKey: newest.hostKey ?? existing.hostKey,
         sessionKey: newest.sessionKey ?? existing.sessionKey,
+        clientKind: newest.clientKind ?? existing.clientKind,
       };
     }
   }

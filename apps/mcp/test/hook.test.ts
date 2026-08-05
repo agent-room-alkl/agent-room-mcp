@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { classifyHookInput, resolveHookSessionKey } from '../src/hook.js';
 import { roomBelongsToSession } from '../src/state.js';
 
@@ -76,5 +76,18 @@ describe('roomBelongsToSession', () => {
 
   it('rejects rooms claimed by a different session', () => {
     expect(roomBelongsToSession({ ...base, sessionKey: 'sess-a' }, 'sess-b')).toBe(false);
+  });
+
+  it('rejects unclaimed rooms joined by a different harness client kind', () => {
+    // If the room was joined by Antigravity, but current client is Codex, it should reject
+    vi.stubEnv('CODEX_RUN_ID', 'test-run'); // force client kind to 'codex'
+    const roomWithClient = { ...base, clientKind: 'antigravity' };
+    expect(roomBelongsToSession(roomWithClient, 'some-session')).toBe(false);
+  });
+
+  it('allows unclaimed rooms joined by the same harness client kind', () => {
+    vi.stubEnv('CODEX_RUN_ID', 'test-run'); // force client kind to 'codex'
+    const roomWithClient = { ...base, clientKind: 'codex' };
+    expect(roomBelongsToSession(roomWithClient, 'some-session')).toBe(true);
   });
 });
