@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { classifyHookInput, resolveHookSessionKey } from '../src/hook.js';
 import { roomBelongsToSession } from '../src/state.js';
 
@@ -52,6 +52,11 @@ describe('resolveHookSessionKey', () => {
 
 describe('roomBelongsToSession', () => {
   const base = { name: 'Antigravity', cursor: 1, joinedAt: 1 };
+
+  beforeEach(() => {
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+  });
 
   it('allows unclaimed rooms when the hook has no session identity (legacy)', () => {
     expect(roomBelongsToSession(base, undefined)).toBe(true);
