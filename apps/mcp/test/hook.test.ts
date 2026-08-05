@@ -95,4 +95,40 @@ describe('roomBelongsToSession', () => {
     const roomWithClient = { ...base, clientKind: 'codex' };
     expect(roomBelongsToSession(roomWithClient, 'some-session')).toBe(true);
   });
+
+  // The hole clientKind alone does not close: Robin's Reddit chat and the chat
+  // that joined the room were BOTH Codex, so they share one clientKind
+  // partition. The room is unclaimed until someone hits Stop, and until 0.26.9
+  // "someone" meant whichever thread got there first. ownerRunId is recorded at
+  // join, so the room is never up for grabs.
+  describe('ownerRunId (bound at join, not claimed at Stop)', () => {
+    it('rejects an unclaimed room joined by a sibling thread of the same client kind', () => {
+      vi.stubEnv('CODEX_RUN_ID', 'reddit-thread');
+      const joinedByOtherThread = { ...base, clientKind: 'codex', ownerRunId: 'room-thread' };
+      // No sessionKey: pre-0.26.10 this returned true and the Reddit thread
+      // claimed the room on its next Stop.
+      expect(roomBelongsToSession(joinedByOtherThread, 'reddit-session')).toBe(false);
+    });
+
+    it('allows the thread that actually joined the room', () => {
+      vi.stubEnv('CODEX_RUN_ID', 'room-thread');
+      const own = { ...base, clientKind: 'codex', ownerRunId: 'room-thread' };
+      expect(roomBelongsToSession(own, 'room-session')).toBe(true);
+    });
+
+    it('stays permissive when the harness exposes no run id (no regression)', () => {
+      // Antigravity et al. expose nothing thread-scoped; ownerRunId must not
+      // make ownership stricter than the harness can support.
+      vi.stubEnv('CODEX_RUN_ID', '');
+      vi.stubEnv('CURSOR_TRACE_ID', '');
+      vi.stubEnv('AGENT_ROOM_RUN_ID', '');
+      const room = { ...base, ownerRunId: 'some-other-run' };
+      expect(roomBelongsToSession(room, undefined)).toBe(true);
+    });
+
+    it('ignores ownerRunId on legacy records that predate it', () => {
+      vi.stubEnv('CODEX_RUN_ID', 'reddit-thread');
+      expect(roomBelongsToSession({ ...base, clientKind: 'codex' }, undefined)).toBe(true);
+    });
+  });
 });

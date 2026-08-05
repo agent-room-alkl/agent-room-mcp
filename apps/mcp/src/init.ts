@@ -13,6 +13,24 @@ const MCP_ENTRY = {
 const HOOK_COMMAND = 'npx -y agent-room-mcp hook';
 const HOOK_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
 
+/**
+ * Matches a TOML `command = "..."` line for ANY spelling of the agent-room hook.
+ *
+ * The "have we installed this already?" check used to be an exact substring
+ * test against HOOK_COMMAND, which meant any hand-written variant defeated it.
+ * Observed 2026-08-05 on Robin's machine: `~/.codex/config.toml` carried a
+ * hand-written `env CODEX_HOME=/Users/robin/.codex npx -y agent-room-mcp hook`,
+ * `init` did not recognise it, and appended a full second set of Stop /
+ * UserPromptSubmit / SessionStart blocks — so every Stop ran the hook twice.
+ * Recognise the hook by what it invokes, not by how it was spelled.
+ */
+const HOOK_COMMAND_LINE_RE =
+  /^[ \t]*command[ \t]*=[ \t]*"[^"\n]*agent-room-mcp[^"\n]*\bhook\b[^"\n]*"[ \t]*$/gm;
+
+export function countInstalledCodexHookCommands(toml: string): number {
+  return toml.match(HOOK_COMMAND_LINE_RE)?.length ?? 0;
+}
+
 // Markers used to make the rules-injection idempotent. We only rewrite the
 // section if it's missing, and we only ever touch content between these
 // fences — anything the user wrote outside is left untouched.
@@ -590,8 +608,13 @@ export async function installCodex(opts: { hooks: boolean }): Promise<InstallRes
       }
     }
 
-    if (modified.includes(`command = "${HOOK_COMMAND}"`)) {
-      result.unchanged.push(`${path} (hooks already installed)`);
+    const installedHookCommands = countInstalledCodexHookCommands(modified);
+    if (installedHookCommands > 0) {
+      result.unchanged.push(
+        installedHookCommands > HOOK_EVENTS.length
+          ? `${path} (hooks already installed — ${installedHookCommands} hook commands found for ${HOOK_EVENTS.length} events; duplicates will each run on every event, remove the extra [[hooks.*]] blocks by hand)`
+          : `${path} (hooks already installed)`,
+      );
     } else {
       for (const event of HOOK_EVENTS) {
         modified = ensureTrailingBlankLine(modified);

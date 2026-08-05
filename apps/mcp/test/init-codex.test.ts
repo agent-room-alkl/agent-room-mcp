@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installCodex } from '../src/init.js';
+import { installCodex, countInstalledCodexHookCommands } from '../src/init.js';
 
 // installCodex writes ~/.codex/config.toml, resolved from CODEX_HOME. Point it
 // at a temp dir so the test never touches the real user config.
@@ -66,5 +66,51 @@ describe('installCodex — hooks', () => {
     expect(toml).toContain('[mcp_servers.agent-room]');
     expect(toml).not.toContain('codex_hooks');
     expect(toml).not.toContain('[[hooks.Stop]]');
+  });
+});
+
+describe('installCodex — duplicate hook detection', () => {
+  // Robin's machine, 2026-08-05: config.toml carried a hand-written
+  // `env CODEX_HOME=... npx -y agent-room-mcp hook`. The old exact-substring
+  // check did not recognise it, so init appended a SECOND full set of hook
+  // blocks and every Stop ran the hook twice.
+  it('recognises a hand-written hook command variant and does not append a second set', async () => {
+    const handWritten = [
+      '[features]',
+      'codex_hooks = true',
+      '',
+      '[[hooks.Stop]]',
+      'matcher = ""',
+      '[[hooks.Stop.hooks]]',
+      'type = "command"',
+      'command = "env CODEX_HOME=/Users/robin/.codex npx -y agent-room-mcp hook"',
+      '',
+    ].join('\n');
+    await writeFile(configPath(), handWritten, 'utf8');
+
+    const result = await installCodex({ hooks: true });
+    const toml = await readFile(configPath(), 'utf8');
+
+    expect(countInstalledCodexHookCommands(toml)).toBe(1);
+    expect(result.unchanged.some((u) => u.includes('hooks already installed'))).toBe(true);
+  });
+
+  it('is idempotent across repeated runs', async () => {
+    await installCodex({ hooks: true });
+    const once = countInstalledCodexHookCommands(await readFile(configPath(), 'utf8'));
+    await installCodex({ hooks: true });
+    const twice = countInstalledCodexHookCommands(await readFile(configPath(), 'utf8'));
+
+    expect(once).toBe(3); // Stop / UserPromptSubmit / SessionStart
+    expect(twice).toBe(once);
+  });
+
+  it('reports duplicates when the config already has more hook commands than events', async () => {
+    await installCodex({ hooks: true });
+    const doubled = (await readFile(configPath(), 'utf8')).repeat(2);
+    await writeFile(configPath(), doubled, 'utf8');
+
+    const result = await installCodex({ hooks: true });
+    expect(result.unchanged.some((u) => u.includes('duplicates will each run'))).toBe(true);
   });
 });
