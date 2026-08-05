@@ -544,6 +544,13 @@ export async function setProjectPrompt(
   }));
 }
 
+export async function bumpGameVersion(client: UpstashClient, code: string): Promise<Room> {
+  return casRoom(client, code, (current) => ({
+    ...current,
+    gameVersion: (current.gameVersion ?? 0) + 1,
+  }));
+}
+
 /**
  * Thrown by `appendMessage` when the sender is not allowed to speak under
  * the current reply-mode turn state. Slice A never throws this; Slice B

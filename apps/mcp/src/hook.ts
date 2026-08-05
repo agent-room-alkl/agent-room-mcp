@@ -1,4 +1,4 @@
-import { createRoomApiClient, getRoom, listMessages } from './roomApi.js';
+import { createRoomApiClient, getMessages, getRoom } from './roomApi.js';
 import type { Message } from '@agent-room/shared';
 import {
   readState,
@@ -127,8 +127,9 @@ async function fetchPending(scope: StateScope, sessionKey?: string): Promise<Pen
       entry.sessionKey = sessionKey;
     }
     let msgs: Message[];
+    let total: number | null;
     try {
-      msgs = await listMessages(client, code, entry.cursor);
+      ({ messages: msgs, total } = await getMessages(client, code, entry.cursor));
     } catch {
       continue;
     }
@@ -148,7 +149,7 @@ async function fetchPending(scope: StateScope, sessionKey?: string): Promise<Pen
       code,
       topic,
       selfName: entry.name,
-      newCursor: entry.cursor + msgs.length,
+      newCursor: total ?? entry.cursor + msgs.length,
       messages: others,
     });
   }

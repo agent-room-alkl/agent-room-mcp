@@ -1,5 +1,5 @@
-// The consolidated tool surface: 7 core tools + 4 extras (task board, host
-// admin, watch, attachment reader) — with every pre-consolidation name still
+// The consolidated tool surface: 7 core tools + 5 extras (task board, host
+// admin, watch, attachment reader, game referee) — with every pre-consolidation name still
 // dispatching as a hidden alias, and AGENT_ROOM_PROFILE=core gating on the
 // canonical (listed) name so legacy core calls like room_status keep working.
 
@@ -26,20 +26,22 @@ afterEach(() => {
 });
 
 describe('consolidated tool surface', () => {
-  it('lists 11 tools on the full profile — consolidated names only, no aliases', async () => {
+  it('lists 12 tools on the full profile — consolidated names only, no aliases', async () => {
     const { server, handlers } = captureHandlers();
     registerTools(server);
     const { tools } = await handlers.get(ListToolsRequestSchema)!({});
     const names = tools.map((t: { name: string }) => t.name);
-    expect(names).toHaveLength(11);
+    expect(names).toHaveLength(12);
     expect(names).toContain('room_task');
     expect(names).toContain('room_admin');
     expect(names).toContain('room_watch');
+    expect(names).toContain('room_game');
     // Old per-verb names are dispatch-only aliases, never listed.
     expect(names).not.toContain('room_task_create');
     expect(names).not.toContain('room_status');
     expect(names).not.toContain('room_set_mode');
     expect(names).not.toContain('room_list_messages');
+    expect(names).not.toContain('room_game_start');
   });
 
   it('core profile lists exactly the 7 core tools', async () => {
@@ -71,7 +73,7 @@ describe('consolidated tool surface', () => {
     const { server, handlers } = captureHandlers();
     registerTools(server);
     const { tools } = await handlers.get(ListToolsRequestSchema)!({});
-    expect(tools.length).toBe(11);
+    expect(tools.length).toBe(12);
   });
 });
 
@@ -118,7 +120,7 @@ describe('toLegacyCall translation', () => {
   it('maps every legacy branch to a listed canonical tool', () => {
     const canonicals = new Set(Object.values(CANONICAL_NAME));
     for (const c of canonicals) {
-      expect(['room_send', 'room_listen', 'room_minutes', 'room_watch', 'room_admin', 'room_task']).toContain(c);
+      expect(['room_send', 'room_listen', 'room_minutes', 'room_watch', 'room_admin', 'room_task', 'room_game']).toContain(c);
     }
   });
 

@@ -13,6 +13,7 @@ import {
   appendMessage,
   appendSystemMessage,
   listMessages,
+  getMessages,
   createRoomReport,
   setListenUntil,
   removeParticipant,
@@ -27,6 +28,9 @@ import {
   verifyTask,
   reassignTaskRoles,
   cancelTask,
+  startGame,
+  getGameView,
+  castGameVote,
   HostNameTakenError,
   MutedError,
   NotYourTurnError,
@@ -46,7 +50,7 @@ import type {
   Room,
   TaskBoard,
 } from '@agent-room/shared';
-import { setRoom, removeRoom, updateCursor, markSent, readState, readRoomStateForJoin } from './state.js';
+import { setRoom, removeRoom, updateCursor, updateGameVersion, markSent, readState, readRoomStateForJoin } from './state.js';
 import {
   detectHarness,
   harnessRunId,
@@ -130,6 +134,9 @@ export const CANONICAL_NAME: Record<string, string> = {
   room_task_verify: 'room_task',
   room_task_reassign: 'room_task',
   room_task_cancel: 'room_task',
+  room_game_start: 'room_game',
+  room_game_view: 'room_game',
+  room_game_vote: 'room_game',
 };
 
 // toLegacyCall: consolidated call -> the legacy branch + args the dispatcher
@@ -157,6 +164,15 @@ export function toLegacyCall(name: string, a: Record<string, any>): { name: stri
       return { name: `room_task_${action}`, args: rest };
     }
     return { name: 'room_task_list', args: { code: a.code } };
+  }
+  if (name === 'room_game') {
+    const action = String(a.action ?? '');
+    const known = new Set(['start', 'view', 'vote']);
+    if (known.has(action)) {
+      const { action: _action, ...rest } = a;
+      return { name: `room_game_${action}`, args: rest };
+    }
+    return { name: 'room_game_view', args: { code: a.code, name: a.name } };
   }
   if (name === 'room_admin') {
     const { action, mode, leadAgentName, moderatorAgentName, targetName, ...rest } = a;
@@ -291,9 +307,21 @@ async function readReplyModeSnapshot(
 type RoomListenPollResult = {
   messages: Message[];
   cursor: number;
+  gameVersion?: number;
   terminated?: 'room_ended' | 'kicked';
   hint: string;
+  gamePrivate?: import('@agent-room/upstash-client').GameView | null;
 };
+
+async function tryGetGamePrivate(client: RoomApiClient, code: string, selfName: string | undefined): Promise<import('@agent-room/upstash-client').GameView | null | undefined> {
+  if (!selfName) return undefined;
+  try { return (await getGameView(client, code, selfName, 'cc')).view; } catch { return undefined; }
+}
+
+async function readMessagesAtHead(client: RoomApiClient, code: string): Promise<{ messages: Message[]; cursor: number }> {
+  const { messages, total } = await getMessages(client, code, 0);
+  return { messages, cursor: total ?? messages.length };
+}
 
 // Best-effort compact task-board snapshot appended to listen results, so an
 // agent glances at the board every cycle (the "时不时看一眼" nudge) without a
@@ -437,6 +465,8 @@ async function runRoomListenPoll(
 ): Promise<RoomListenPollResult> {
   const cappedMs = Math.min(Math.max(1000, timeoutMs), MAX_LISTEN_MS);
   const start = Date.now();
+  const storedRoomState = selfName ? await readRoomStateForJoin(code, selfName) : undefined;
+  let lastGameVersion = storedRoomState?.gameVersion;
   if (selfName) {
     try {
       await setListenUntil(client, code, selfName, start + cappedMs);
@@ -451,6 +481,7 @@ async function runRoomListenPoll(
   const MAX_POLL_DELAY_MS = 10_000;
   let pollDelayMs = 2_000;
   let lastSweepAt = start;
+  let observedGameVersion: number | undefined;
   // Last reply mode seen by the per-tick room probe; feeds the task-board hint
   // so the empty-board nudge only fires in modes where the board exists.
   let lastReplyMode: ReplyMode | undefined;
@@ -476,6 +507,7 @@ async function runRoomListenPoll(
       const room = doSweep
         ? await sweepRoom(client, code)
         : await getRoom(client, code);
+      observedGameVersion = room.gameVersion;
       lastReplyMode = room.replyMode;
       if (room.status === 'ended') {
         try { await removeRoom(code); } catch { /* non-essential */ }
@@ -496,10 +528,13 @@ async function runRoomListenPoll(
         };
       }
     } catch { /* transient — keep listening */ }
-    const msgs = await listMessages(client, code, since);
-    if (msgs.length > 0) {
-      const cursor = since + msgs.length;
+    const { messages: msgs, total } = await getMessages(client, code, since);
+    const gameChanged = observedGameVersion !== undefined && observedGameVersion !== lastGameVersion;
+    if (gameChanged) lastGameVersion = observedGameVersion;
+    if (msgs.length > 0 || gameChanged) {
+      const cursor = total ?? since + msgs.length;
       await updateCursor(code, cursor);
+      if (lastGameVersion !== undefined) await updateGameVersion(code, lastGameVersion);
       const attachmentCount = msgs.reduce(
         (acc: number, m: Message) => acc + (Array.isArray(m.attachments) ? m.attachments.length : 0),
         0,
@@ -511,7 +546,9 @@ async function runRoomListenPoll(
       return {
         messages: msgs,
         cursor,
-        hint: baseHint + attachmentHint + await taskBoardHintLine(client, code, lastReplyMode),
+        ...(lastGameVersion !== undefined ? { gameVersion: lastGameVersion } : {}),
+        gamePrivate: await tryGetGamePrivate(client, code, selfName),
+        hint: (gameChanged ? '[GAME] Private game state changed; inspect gamePrivate before acting. ' : '') + baseHint + attachmentHint + await taskBoardHintLine(client, code, lastReplyMode),
       };
     }
     await new Promise((r) => setTimeout(r, pollDelayMs));
@@ -522,6 +559,8 @@ async function runRoomListenPoll(
   return {
     messages: [],
     cursor: since,
+    ...(lastGameVersion !== undefined ? { gameVersion: lastGameVersion } : {}),
+    gamePrivate: await tryGetGamePrivate(client, code, selfName),
     hint:
       `Listened for ${cappedMs}ms — quiet so far. This is normal. ` +
       `${nextListenContract(code, since)} ` +
@@ -583,9 +622,9 @@ export function registerTools(server: Server) {
           if (selfName) {
             await setListenUntil(client, code, selfName, Date.now() + 5000);
           }
-          const msgs = await listMessages(client, code, cursor);
+          const { messages: msgs, total } = await getMessages(client, code, cursor);
           if (msgs.length > 0) {
-            cursor += msgs.length;
+            cursor = total ?? cursor + msgs.length;
             const others = msgs.filter((m: Message) => !(m.client === 'cc' && m.name === selfName));
             if (others.length > 0) {
               const summary = others.map((m: Message) => `${m.name}: ${m.text}`).join('\n');
@@ -787,6 +826,31 @@ export function registerTools(server: Server) {
         },
       },
       {
+        name: 'room_game',
+        description:
+          'Social-deduction game referee — the referee is server-side code, never an LLM. Currently supports "undercover" (谁是卧底): everyone gets the civilian word except one player, who gets the undercover word; alive players vote each round; the server tallies, eliminates the plurality target, and declares a winner. ' +
+          'start → deal a fresh game (civilianWord + undercoverWord required; defaults to every current room participant if `participants` is omitted — needs 3+). view → fetch YOUR OWN filtered view (word/role/alive only for you, never anyone else\'s — call this every room_listen tick, not just once). vote → cast your vote for this round; once every alive player has voted the server auto-tallies. ' +
+          'Every response returns only the caller\'s own view — the response never contains another player\'s word.',
+        inputSchema: {
+          type: 'object',
+          required: ['code', 'action'],
+          properties: {
+            code: { type: 'string', description: 'Room code' },
+            action: { type: 'string', enum: ['start', 'view', 'vote'], description: 'What to do' },
+            name: { type: 'string', description: 'Your display name (required for all actions)' },
+            civilianWord: { type: 'string', description: 'start: the word everyone but the undercover receives' },
+            undercoverWord: { type: 'string', description: 'start: the word the undercover receives — must differ from civilianWord' },
+            participants: {
+              type: 'array',
+              description: 'start: explicit player list [{name, client}] — defaults to every current room participant if omitted',
+              items: { type: 'object', properties: { name: { type: 'string' }, client: { type: 'string', enum: ['web', 'cc'] } }, required: ['name', 'client'] },
+            },
+            targetName: { type: 'string', description: 'vote: display name of who you are voting to eliminate' },
+            targetClient: { type: 'string', enum: ['web', 'cc'], description: 'vote: target client kind (default cc)' },
+          },
+        },
+      },
+      {
         name: 'room_admin',
         description:
           'Host controls (only the session that created the room; moderators may use action="invoke"). reactivate → revive an ended room. ' +
@@ -885,18 +949,18 @@ export function registerTools(server: Server) {
         hostKey: created.hostKey,
         priorIdentity: { name: a.name, client: 'cc' },
       });
-      const msgs = await listMessages(client, code, 0);
+      const { messages: msgs, cursor: initialCursor } = await readMessagesAtHead(client, code);
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
       // ownerRunId binds the room to the thread that created it, so a sibling
       // thread on the same harness cannot claim it by reaching Stop first.
-      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey, clientKind: harness.kind, ownerRunId: harnessRunId() });
+      await setRoom(code, { name: a.name, cursor: initialCursor, joinedAt: Date.now(), hostKey: created.hostKey, clientKind: harness.kind, ownerRunId: harnessRunId(), gameVersion: created.gameVersion });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
       if (listenAfterJoin) {
-        const first = await runRoomListenPoll(client, code, msgs.length, listenMs, a.name);
+        const first = await runRoomListenPoll(client, code, initialCursor, listenMs, a.name);
         await updateCursor(code, first.cursor);
         if (!first.terminated && shouldAutoWatch) {
           startRoomWatcher(code, a.name, first.cursor);
@@ -920,19 +984,19 @@ export function registerTools(server: Server) {
       }
 
       if (shouldAutoWatch) {
-        startRoomWatcher(code, a.name, msgs.length);
+        startRoomWatcher(code, a.name, initialCursor);
       }
       return ok({
         code,
         topic: created.topic,
-        cursor: msgs.length,
+        cursor: initialCursor,
         joinUrl: `https://www.agent-room.com/j/${code}`,
         roleBrief: roleBriefFor(a.role ?? ''),
         ...(created.projectPrompt ? { projectPrompt: created.projectPrompt, projectPromptVersion: created.projectPromptVersion ?? 1 } : {}),
         ...(created.projectMemoryContext ? { projectMemoryContext: created.projectMemoryContext, projectId: created.projectId, projectName: created.projectName } : {}),
         autoWatchStarted: shouldAutoWatch,
         clientKind: harness.kind,
-        hint: `Room created. ${nextListenContract(code, msgs.length)}${persistenceNudge}`,
+        hint: `Room created. ${nextListenContract(code, initialCursor)}${persistenceNudge}`,
       });
     }
 
@@ -1000,8 +1064,8 @@ export function registerTools(server: Server) {
           await appendMessage(client, a.code, greeting);
         } catch { /* greeting is nice-to-have; join/listen must still proceed */ }
       }
-      const msgs = await listMessages(client, a.code, 0);
-      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now(), clientKind: harness.kind, ownerRunId: harnessRunId() });
+      const { messages: msgs, cursor: initialCursor } = await readMessagesAtHead(client, a.code);
+      await setRoom(a.code, { name: finalName, cursor: initialCursor, joinedAt: Date.now(), clientKind: harness.kind, ownerRunId: harnessRunId(), gameVersion: updated.gameVersion });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,
@@ -1020,7 +1084,7 @@ export function registerTools(server: Server) {
       const joinSnapshot = await readReplyModeSnapshot(client, updated, finalName);
 
       if (listenAfterJoin) {
-        const first = await runRoomListenPoll(client, a.code, msgs.length, listenMs, finalName);
+        const first = await runRoomListenPoll(client, a.code, initialCursor, listenMs, finalName);
         await updateCursor(a.code, first.cursor);
         if (!first.terminated && shouldAutoWatch) {
           startRoomWatcher(a.code, finalName, first.cursor);
@@ -1065,7 +1129,7 @@ export function registerTools(server: Server) {
       }
 
       if (shouldAutoWatch) {
-        startRoomWatcher(a.code, finalName, msgs.length);
+        startRoomWatcher(a.code, finalName, initialCursor);
       }
       return ok({
         code: a.code,
@@ -1081,7 +1145,7 @@ export function registerTools(server: Server) {
           listenUntil: p.listenUntil,
           canSpeak: p.canSpeak !== false,
         })),
-        cursor: msgs.length,
+        cursor: initialCursor,
         recentMessages,
         roleBrief: roleBriefFor(a.role ?? ''),
         ...(updated.projectPrompt ? { projectPrompt: updated.projectPrompt, projectPromptVersion: updated.projectPromptVersion ?? 1 } : {}),
@@ -1091,8 +1155,8 @@ export function registerTools(server: Server) {
         autoWatchStarted: shouldAutoWatch,
         clientKind: harness.kind,
         hint: muted
-          ? `Joined as "${finalName}" — but the host (${updated.createdBy}) has muted you in this room. room_send will return error="muted" until you're unmuted. Call room_listen to read the conversation while you wait. ${nextListenContract(a.code, msgs.length)}${persistenceNudge}`
-          : `Joined as "${finalName}". ${recentMessages.length} recent messages above for context. ${nextListenContract(a.code, msgs.length)}${persistenceNudge}`,
+          ? `Joined as "${finalName}" — but the host (${updated.createdBy}) has muted you in this room. room_send will return error="muted" until you're unmuted. Call room_listen to read the conversation while you wait. ${nextListenContract(a.code, initialCursor)}${persistenceNudge}`
+          : `Joined as "${finalName}". ${recentMessages.length} recent messages above for context. ${nextListenContract(a.code, initialCursor)}${persistenceNudge}`,
       });
     }
 
@@ -1186,9 +1250,9 @@ export function registerTools(server: Server) {
         }
         throw e;
       }
-      const msgs = await listMessages(client, a.code, 0);
+      const { messages: msgs, cursor: currentCursor } = await readMessagesAtHead(client, a.code);
       // Advance cursor past our own message so the Stop hook does not re-inject it.
-      await updateCursor(a.code, msgs.length);
+      await updateCursor(a.code, currentCursor);
       // Record send-time so the Stop hook will hold briefly waiting for a reply.
       await markSent(a.code, Date.now());
       // Supplement-skip token (`__no_addition__`) is consumed by the turn
@@ -1200,18 +1264,18 @@ export function registerTools(server: Server) {
           sent: true,
           appended: false,
           reason: 'no_addition',
-          cursor: msgs.length,
+          cursor: currentCursor,
           metadata: appendResult.metadata,
-          hint: `Your "${"__no_addition__"}" was accepted — the supplement role was skipped without posting a message. ${nextListenContract(a.code, msgs.length)}`,
+          hint: `Your "${"__no_addition__"}" was accepted — the supplement role was skipped without posting a message. ${nextListenContract(a.code, currentCursor)}`,
         });
       }
       return ok({
         sent: true,
         appended: true,
-        cursor: msgs.length,
+        cursor: currentCursor,
         ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
         ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
-        hint: `Sent. ${nextListenContract(a.code, msgs.length)}`,
+        hint: `Sent. ${nextListenContract(a.code, currentCursor)}`,
       });
     }
 
@@ -1272,27 +1336,27 @@ export function registerTools(server: Server) {
         }
         throw e;
       }
-      const msgs = await listMessages(client, a.code, 0);
-      await updateCursor(a.code, msgs.length);
+      const { cursor: currentCursor } = await readMessagesAtHead(client, a.code);
+      await updateCursor(a.code, currentCursor);
       await markSent(a.code, Date.now());
       const extended = appendResult.metadata?.extendsTurn === true;
       return ok({
         sent: true,
         appended: true,
-        cursor: msgs.length,
+        cursor: currentCursor,
         extendsTurn: extended,
         ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
         ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
         hint: extended
-          ? `Status posted — your turn deadline was renewed. Keep working; send another room_status before it lapses if you need more time, or room_send your result when done. ${nextListenContract(a.code, msgs.length)}`
-          : `Status posted (no turn change). ${nextListenContract(a.code, msgs.length)}`,
+          ? `Status posted — your turn deadline was renewed. Keep working; send another room_status before it lapses if you need more time, or room_send your result when done. ${nextListenContract(a.code, currentCursor)}`
+          : `Status posted (no turn change). ${nextListenContract(a.code, currentCursor)}`,
       });
     }
 
     if (name === 'room_list_messages') {
       const since = typeof a.since === 'number' ? a.since : 0;
-      const msgs = await listMessages(client, a.code, since);
-      const cursor = since + msgs.length;
+      const { messages: msgs, total } = await getMessages(client, a.code, since);
+      const cursor = total ?? since + msgs.length;
       await updateCursor(a.code, cursor);
       return ok({ messages: msgs, cursor });
     }
@@ -1341,6 +1405,8 @@ export function registerTools(server: Server) {
       return ok({
         messages: result.messages,
         cursor: result.cursor,
+        ...(result.gameVersion !== undefined ? { gameVersion: result.gameVersion } : {}),
+        ...(result.gamePrivate !== undefined ? { gamePrivate: result.gamePrivate } : {}),
         ...(result.terminated ? { terminated: result.terminated } : {}),
         ...(snapshot ?? {}),
         hint: result.hint,
@@ -1798,6 +1864,21 @@ export function registerTools(server: Server) {
       } catch (e) {
         return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message });
       }
+    }
+
+    if (name === 'room_game_start') {
+      try {
+        const { view } = await startGame(client, a.code, a.name, a.civilianWord, a.undercoverWord, Array.isArray(a.participants) ? a.participants : undefined);
+        return ok({ ok: true, code: a.code, view, hint: `Game dealt. Your private word is only in view.you; do not say it verbatim. Call room_listen to receive state updates.` });
+      } catch (e) { return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message }); }
+    }
+    if (name === 'room_game_view') {
+      try { return ok({ ok: true, code: a.code, view: (await getGameView(client, a.code, a.name, 'cc')).view }); }
+      catch (e) { return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message }); }
+    }
+    if (name === 'room_game_vote') {
+      try { return ok({ ok: true, code: a.code, view: (await castGameVote(client, a.code, a.name, 'cc', a.targetName, a.targetClient ?? 'cc')).view }); }
+      catch (e) { return ok({ ok: false, error: (e as Error).name, hint: (e as Error).message }); }
     }
 
     throw new Error(`Unknown tool: ${name}`);

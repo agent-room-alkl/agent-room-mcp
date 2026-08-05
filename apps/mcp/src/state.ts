@@ -29,6 +29,7 @@ export interface RoomState {
   cursor: number;
   joinedAt: number;
   lastSentAt?: number;
+  gameVersion?: number;
   // Stored when this MCP session is the host of the room (room_create).
   // Required to claim the host display name on rejoin / reconnect; without
   // it, joinRoom rejects with HostNameTakenError. Plain text on disk under
@@ -164,6 +165,9 @@ export function mergeStates(states: AgentRoomState[]): AgentRoomState {
         // guard against replaying messages, and both records saw the room.
         cursor: Math.max(existing.cursor, room.cursor),
         lastSentAt: Math.max(existing.lastSentAt ?? 0, room.lastSentAt ?? 0) || undefined,
+        gameVersion: Math.max(existing.gameVersion ?? -1, room.gameVersion ?? -1) >= 0
+          ? Math.max(existing.gameVersion ?? -1, room.gameVersion ?? -1)
+          : undefined,
         hostKey: winner.hostKey ?? existing.hostKey ?? room.hostKey,
       };
     }
@@ -321,6 +325,16 @@ export async function updateCursor(code: string, cursor: number): Promise<void> 
     if (!room) return;
     if (cursor <= room.cursor) return;
     room.cursor = cursor;
+    await writeState(state);
+  });
+}
+
+export async function updateGameVersion(code: string, gameVersion: number): Promise<void> {
+  await withStateLock(async () => {
+    const state = await readState();
+    const room = state.rooms[code];
+    if (!room || (room.gameVersion ?? -1) >= gameVersion) return;
+    room.gameVersion = gameVersion;
     await writeState(state);
   });
 }

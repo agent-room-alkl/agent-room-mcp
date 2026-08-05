@@ -78,7 +78,8 @@ export type SystemEventType =
   | 'moderator_handoff'  // moderator timed out / left — floor handed to a deputy
   | 'task_update'        // evidence-gated task board changed state
   | 'project_prompt_updated' // host set/cleared the room's project prompt
-  | 'room_budget_paused'; // per-room / daily platform spend ceiling reached
+  | 'room_budget_paused' // per-room / daily platform spend ceiling reached
+  | 'game_update';
 
 // Default per-role timeout values (in ms). Used when a room hasn't been
 // configured with custom overrides. Agent turns can involve real code edits,
@@ -196,6 +197,7 @@ export interface Room {
   projectPromptVersion?: number;
   // Epoch ms of the last successful setProjectPrompt write (set or clear).
   projectPromptUpdatedAt?: number;
+  gameVersion?: number;
 }
 
 export type MessageKind = 'msg' | 'sys';
