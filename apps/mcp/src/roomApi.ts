@@ -23,7 +23,7 @@ import type {
   Task,
   TaskBoard,
 } from '@agent-room/shared';
-import type { AppendResult, TurnState, TurnSpokenEntry } from '@agent-room/upstash-client';
+import type { AppendResult, TurnState, TurnSpokenEntry, GameView } from '@agent-room/upstash-client';
 
 // Errors reconstructed from the API response body. The server serializes
 // thrown errors as `{ error: <ErrorName>, message }`; we re-hydrate the few
@@ -162,9 +162,13 @@ export async function joinRoom(
   };
 }
 
+export async function getMessages(client: RoomApiClient, code: string, since: number): Promise<{ messages: Message[]; total: number | null }> {
+  const body = await client.post<{ messages: Message[]; total: number | null }>({ action: 'messages', code, cursor: since });
+  return { messages: body.messages, total: typeof body.total === 'number' ? body.total : null };
+}
+
 export async function listMessages(client: RoomApiClient, code: string, since: number): Promise<Message[]> {
-  const body = await client.post<{ messages: Message[] }>({ action: 'messages', code, cursor: since });
-  return body.messages;
+  return (await getMessages(client, code, since)).messages;
 }
 
 // Trigger the server-side turn-timeout sweep and return the current room.
@@ -396,5 +400,26 @@ export async function cancelTask(
   return client.post<{ board: TaskBoard; task: Task }>({
     action: 'taskCancel', code, id, requesterName, requesterClient, hostKey, reason,
   });
+}
+
+export async function gameAction(client: RoomApiClient, code: string, operation: 'start', requesterName: string, civilianWord: string, undercoverWord: string, participants?: Array<{ name: string; client: ClientKind }>): Promise<{ view: GameView }>;
+export async function gameAction(client: RoomApiClient, code: string, operation: 'view', requesterName: string, requesterClient: ClientKind): Promise<{ view: GameView | null }>;
+export async function gameAction(client: RoomApiClient, code: string, operation: 'vote', requesterName: string, requesterClient: ClientKind, targetName: string, targetClient: ClientKind): Promise<{ view: GameView }>;
+export async function gameAction(client: RoomApiClient, code: string, operation: 'start' | 'view' | 'vote', requesterName: string, arg2: string, arg3?: string, arg4?: Array<{ name: string; client: ClientKind }> | ClientKind, arg5?: string, arg6?: ClientKind): Promise<{ view: GameView | null }> {
+  const payload = operation === 'start'
+    ? { action: 'gameAction', code, operation, requesterName, civilianWord: arg2, undercoverWord: arg3, participants: arg4 as Array<{ name: string; client: ClientKind }> | undefined }
+    : operation === 'view'
+      ? { action: 'gameAction', code, operation, requesterName, requesterClient: arg2 as ClientKind }
+      : { action: 'gameAction', code, operation, requesterName, requesterClient: arg2 as ClientKind, targetName: arg3!, targetClient: arg4 as ClientKind };
+  return client.post(payload);
+}
+export async function startGame(client: RoomApiClient, code: string, requesterName: string, civilianWord: string, undercoverWord: string, participants?: Array<{ name: string; client: ClientKind }>): Promise<{ view: GameView }> {
+  return gameAction(client, code, 'start', requesterName, civilianWord, undercoverWord, participants) as Promise<{ view: GameView }>;
+}
+export async function getGameView(client: RoomApiClient, code: string, requesterName: string, requesterClient: ClientKind): Promise<{ view: GameView | null }> {
+  return gameAction(client, code, 'view', requesterName, requesterClient);
+}
+export async function castGameVote(client: RoomApiClient, code: string, requesterName: string, requesterClient: ClientKind, targetName: string, targetClient: ClientKind): Promise<{ view: GameView }> {
+  return gameAction(client, code, 'vote', requesterName, requesterClient, targetName, targetClient) as Promise<{ view: GameView }>;
 }
 

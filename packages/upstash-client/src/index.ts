@@ -2,6 +2,7 @@ export * from './client.js';
 export * from './errors.js';
 export * from './rooms.js';
 export * from './turnState.js';
+export * from './gameState.js';
 export * from './tasks.js';
 export * from './messages.js';
 export * from './reports.js';
