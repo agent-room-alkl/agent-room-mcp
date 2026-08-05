@@ -106,6 +106,26 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
 }
 
 /**
+ * Per-thread run identifier, when the harness exposes one to child processes.
+ *
+ * This is the ONLY identity that both the MCP server (which performs the join)
+ * and the hook process (which decides whether to inject the room contract) can
+ * observe — hook payload `session_id` reaches the hook but never the server, so
+ * it cannot be recorded at join time. Recording the run id at join lets a room
+ * be bound to the thread that actually joined it, instead of being claimed by
+ * whichever thread happens to hit Stop first.
+ *
+ * Returns undefined when the harness exposes nothing thread-scoped; callers
+ * MUST treat that as "no opinion" and fall back to the other checks, so this
+ * can never make ownership stricter than the harness can actually support.
+ */
+export function harnessRunId(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env.AGENT_ROOM_RUN_ID || env.CODEX_RUN_ID || env.CURSOR_TRACE_ID;
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/**
  * Build the persistence-setup nudge appended to room_join / room_create hints
  * for harnesses that don't auto-loop. Returns empty string for strong-loop
  * harnesses (Claude Code, Codex) so we don't add noise where it isn't

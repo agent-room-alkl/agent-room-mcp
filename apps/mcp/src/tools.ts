@@ -49,6 +49,7 @@ import type {
 import { setRoom, removeRoom, updateCursor, markSent, readState, readRoomStateForJoin } from './state.js';
 import {
   detectHarness,
+  harnessRunId,
   defaultListenAfterJoin,
   mcpTimeoutHint,
   persistenceSetupHint,
@@ -888,7 +889,9 @@ export function registerTools(server: Server) {
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
-      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey, clientKind: harness.kind });
+      // ownerRunId binds the room to the thread that created it, so a sibling
+      // thread on the same harness cannot claim it by reaching Stop first.
+      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey, clientKind: harness.kind, ownerRunId: harnessRunId() });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
@@ -998,7 +1001,7 @@ export function registerTools(server: Server) {
         } catch { /* greeting is nice-to-have; join/listen must still proceed */ }
       }
       const msgs = await listMessages(client, a.code, 0);
-      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now(), clientKind: harness.kind });
+      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now(), clientKind: harness.kind, ownerRunId: harnessRunId() });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,

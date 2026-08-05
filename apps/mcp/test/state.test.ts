@@ -222,3 +222,165 @@ describe('state lock', () => {
     }
   });
 });
+
+describe('mergeStates — cross-client ownership', () => {
+  const room = (over: Partial<import('../src/state.js').RoomState>) => ({
+    name: 'X',
+    cursor: 1,
+    joinedAt: 1,
+    ...over,
+  });
+
+  // Observed 2026-08-05: Antigravity joined AV6-B7T-R6S, then Claude Desktop
+  // joined the same room 118s later. mergeStates kept only the newest record's
+  // clientKind, so the shared merged record flipped to 'unknown' and
+  // Antigravity's own room stopped matching its own clientKind check. Whoever
+  // joins last must not take ownership of everyone else's room record.
+  it('prefers the record matching the reading harness over the most recent one', async () => {
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'reader-thread'); // reading harness is 'codex'
+    const { mergeStates: merge } = await import('../src/state.js');
+
+    const mine: AgentRoomState = {
+      version: 1,
+      rooms: { 'AV6-B7T-R6S': room({ clientKind: 'codex', joinedAt: 100 }) },
+    };
+    const theirsButNewer: AgentRoomState = {
+      version: 1,
+      rooms: { 'AV6-B7T-R6S': room({ clientKind: 'antigravity', joinedAt: 999 }) },
+    };
+
+    expect(merge([mine, theirsButNewer]).rooms['AV6-B7T-R6S']?.clientKind).toBe('codex');
+    // Order of state files on disk must not change the outcome.
+    expect(merge([theirsButNewer, mine]).rooms['AV6-B7T-R6S']?.clientKind).toBe('codex');
+  });
+
+  it('never grafts the losing record\'s owner identity onto the winner', async () => {
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'reader-thread');
+    const { mergeStates: merge } = await import('../src/state.js');
+
+    const winner: AgentRoomState = {
+      version: 1,
+      rooms: { 'AV6-B7T-R6S': room({ clientKind: 'codex', joinedAt: 100, cursor: 5 }) },
+    };
+    const loser: AgentRoomState = {
+      version: 1,
+      rooms: {
+        'AV6-B7T-R6S': room({
+          clientKind: 'antigravity',
+          joinedAt: 999,
+          cursor: 9,
+          sessionKey: 'their-session',
+          ownerRunId: 'their-thread',
+        }),
+      },
+    };
+
+    const merged = merge([winner, loser]).rooms['AV6-B7T-R6S'];
+    // `winner.x ?? loser.x` would hand the winner an owner it never had.
+    expect(merged?.sessionKey).toBeUndefined();
+    expect(merged?.ownerRunId).toBeUndefined();
+    // Cursor is still maxed — it only guards against replaying messages.
+    expect(merged?.cursor).toBe(9);
+  });
+
+  it('falls back to recency when both records match the reading harness', async () => {
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'reader-thread');
+    const { mergeStates: merge } = await import('../src/state.js');
+
+    const older: AgentRoomState = {
+      version: 1,
+      rooms: { 'AV6-B7T-R6S': room({ clientKind: 'codex', joinedAt: 100, name: 'old' }) },
+    };
+    const newer: AgentRoomState = {
+      version: 1,
+      rooms: { 'AV6-B7T-R6S': room({ clientKind: 'codex', joinedAt: 999, name: 'new' }) },
+    };
+
+    expect(merge([older, newer]).rooms['AV6-B7T-R6S']?.name).toBe('new');
+  });
+});
+
+describe('readHarnessStateOrMerged — harness scope must not read other clients', () => {
+  // The Codex/Cursor stop hook reads harness scope. The old `rooms.length > 0`
+  // guard fell through to readMergedState() whenever the harness file listed no
+  // rooms — i.e. on every Stop of every Codex thread not in a room — and that
+  // read EVERY client's state file, before clientKind could filter anything.
+  it('returns the empty harness state instead of falling back to merged', async () => {
+    const dir = await makeStateDir('agent-room-harness-scope-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'reader-thread'); // harness file = state-harness-codex.json
+
+    // Another client (Antigravity) is in a room and wrote its own PPID file.
+    await fs.writeFile(
+      join(dir, 'state-99999.json'),
+      JSON.stringify({
+        version: 1,
+        rooms: { 'AV6-B7T-R6S': { name: 'Antigravity', cursor: 1, joinedAt: 1, clientKind: 'antigravity' } },
+      }),
+    );
+    // This harness has an empty harness file: it is in no room.
+    await fs.writeFile(
+      join(dir, 'state-harness-codex.json'),
+      JSON.stringify({ version: 1, rooms: {}, blockStreak: 0 }),
+    );
+
+    const { readHarnessStateOrMerged } = await import('../src/state.js');
+    expect(Object.keys((await readHarnessStateOrMerged()).rooms)).toEqual([]);
+  });
+
+  it('still falls back to merged when no harness file exists yet (pre-0.26.6 state)', async () => {
+    const dir = await makeStateDir('agent-room-harness-legacy-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'reader-thread');
+
+    await fs.writeFile(
+      join(dir, 'state-99999.json'),
+      JSON.stringify({
+        version: 1,
+        rooms: { 'AV6-B7T-R6S': { name: 'Legacy', cursor: 1, joinedAt: 1 } },
+      }),
+    );
+
+    const { readHarnessStateOrMerged } = await import('../src/state.js');
+    expect(Object.keys((await readHarnessStateOrMerged()).rooms)).toEqual(['AV6-B7T-R6S']);
+  });
+});
+
+describe('claimRoomSessionEverywhere — stamps only the caller\'s own records', () => {
+  it('leaves another client\'s record for the same room untouched', async () => {
+    const dir = await makeStateDir('agent-room-claim-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'my-thread');
+
+    const foreign = join(dir, 'state-99999.json');
+    await fs.writeFile(
+      foreign,
+      JSON.stringify({
+        version: 1,
+        rooms: { 'AV6-B7T-R6S': { name: 'Antigravity', cursor: 1, joinedAt: 1, clientKind: 'antigravity' } },
+      }),
+    );
+
+    const { setRoom, claimRoomSessionEverywhere } = await import('../src/state.js');
+    await setRoom('AV6-B7T-R6S', { name: 'Me', cursor: 1, joinedAt: 2, clientKind: 'codex', ownerRunId: 'my-thread' });
+
+    expect(await claimRoomSessionEverywhere('AV6-B7T-R6S', 'my-session')).toBe(true);
+
+    // Pre-0.26.10 this wrote 'my-session' into Antigravity's record too — which
+    // is how two different agents ended up sharing one sessionKey.
+    const after = JSON.parse(await fs.readFile(foreign, 'utf8'));
+    expect(after.rooms['AV6-B7T-R6S'].sessionKey).toBeUndefined();
+  });
+});
