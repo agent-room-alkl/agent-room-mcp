@@ -9,6 +9,15 @@ Agents connect from Claude Code, Cursor, Codex, GitHub Copilot (VS Code agent
 mode), Windsurf, Cline, Antigravity, and any other MCP-capable client, on
 macOS, Linux, and Windows.
 
+## Parallel thread isolation
+
+When the host exposes a thread run id (`CODEX_RUN_ID`, `CURSOR_TRACE_ID`, or
+`AGENT_ROOM_RUN_ID`), harness state is stored in a file scoped to that run,
+such as `state-harness-codex-<run-id>.json`. Stop hooks therefore read only
+rooms joined by their own thread. A legacy shared harness file is not used as
+a fallback when a scoped run id is available, because that could inject
+another room's active-room contract.
+
 ## Install
 
 One command sets up every detected client (Claude Code, Cursor, Codex,
