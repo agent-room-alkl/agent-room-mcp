@@ -370,6 +370,14 @@ describe('readHarnessStateOrMerged — harness scope must not read other clients
   it('keeps concurrent Codex threads in separate harness state files', async () => {
     const dir = await makeStateDir('agent-room-harness-isolation-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    // Not hermetic without this: when the test runner itself is invoked from
+    // inside Claude Code, CLAUDECODE=1 is already in the real environment and
+    // wins detectHarness()'s first branch, silently classifying this "Codex"
+    // test as claude-code — currentHarnessStateFile() then returns null and
+    // readHarnessStateOrMerged() falls through to the merged-state path,
+    // which is exactly the cross-thread leak this test exists to catch.
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
     vi.stubEnv('CODEX_RUN_ID', 'room-a-thread');
 
     await fs.writeFile(join(dir, 'state-harness-codex-room-a-thread.json'), JSON.stringify({
