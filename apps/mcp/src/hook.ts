@@ -227,13 +227,17 @@ export async function runHook(): Promise<void> {
   }
   const { event, cursorMode } = classified;
   const sessionKey = resolveHookSessionKey(input);
-  // Cursor and Codex may start the MCP server and Stop hook under different
-  // wrapper processes, so their PPID-scoped state files do not always match.
-  // Those hooks read a stable harness state file first and fall back to merged
-  // state for old pre-fix installs. Claude keeps scoped state to preserve
-  // parallel-session isolation.
+  // Cursor may start the MCP server and Stop hook under different wrapper
+  // processes, so its PPID-scoped state files do not always match. Cursor
+  // keeps its stable harness state; Codex uses the PPID-scoped state here to
+  // avoid a cross-thread shared file when Desktop exposes no run id.
   const harnessKind = detectHarness().kind;
-  const stateScope: StateScope = cursorMode || harnessKind === 'codex' ? 'harness' : 'scoped';
+  // Codex Desktop does not always expose a thread run id. In that case the
+  // PPID-scoped state is the safest available boundary; the legacy shared
+  // Codex harness file would make separate desktop threads see each other's
+  // rooms. Cursor retains harness scope for integrations that lack a stable
+  // per-process parent relationship.
+  const stateScope: StateScope = cursorMode ? 'harness' : 'scoped';
 
   // User typed something — fresh turn cycle. Reset the block streak so the
   // next Stop hook can block fresh up to MAX_BLOCKS_PER_CYCLE times.

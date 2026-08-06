@@ -88,7 +88,7 @@ describe('state harness files', () => {
     vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
   });
 
-  it('writes stable Codex harness state alongside the PPID-scoped state', async () => {
+  it('writes thread-scoped Codex harness state alongside the PPID-scoped state', async () => {
     const dir = await makeStateDir('agent-room-state-codex-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CODEX_RUN_ID', 'test-run');
@@ -101,22 +101,34 @@ describe('state harness files', () => {
     });
 
     const files = await fs.readdir(dir);
-    expect(files).toContain('state-harness-codex.json');
+    expect(files).toContain('state-harness-codex-test-run.json');
 
-    const harnessRaw = await fs.readFile(join(dir, 'state-harness-codex.json'), 'utf8');
+    const harnessRaw = await fs.readFile(join(dir, 'state-harness-codex-test-run.json'), 'utf8');
     expect(JSON.parse(harnessRaw).rooms['ABC-DEF-GHJ']).toMatchObject({
       name: 'Codex',
       cursor: 2,
     });
   });
 
-  it('reads Codex harness state when the hook PPID state is empty', async () => {
+  it('does not write a shared Codex harness file when no run id is exposed', async () => {
+    const dir = await makeStateDir('agent-room-state-codex-anonymous-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_RUN_ID', '');
+    vi.stubEnv('AGENT_ROOM_RUN_ID', '');
+
+    const { setRoom } = await import('../src/state.js');
+    await setRoom('ABC-DEF-GHJ', { name: 'Codex', cursor: 2, joinedAt: 123 });
+
+    expect((await fs.readdir(dir)).some((name) => name === 'state-harness-codex.json')).toBe(false);
+  });
+
+  it('reads thread-scoped Codex harness state when the hook PPID state is empty', async () => {
     const dir = await makeStateDir('agent-room-state-codex-read-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CODEX_RUN_ID', 'test-run');
 
     await fs.writeFile(
-      join(dir, 'state-harness-codex.json'),
+      join(dir, 'state-harness-codex-test-run.json'),
       JSON.stringify({
         version: 1,
         blockStreak: 0,
@@ -311,12 +323,12 @@ describe('readHarnessStateOrMerged — harness scope must not read other clients
   // guard fell through to readMergedState() whenever the harness file listed no
   // rooms — i.e. on every Stop of every Codex thread not in a room — and that
   // read EVERY client's state file, before clientKind could filter anything.
-  it('returns the empty harness state instead of falling back to merged', async () => {
+  it('returns the empty thread-scoped harness state instead of falling back to merged', async () => {
     const dir = await makeStateDir('agent-room-harness-scope-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CLAUDECODE', '');
     vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
-    vi.stubEnv('CODEX_RUN_ID', 'reader-thread'); // harness file = state-harness-codex.json
+    vi.stubEnv('CODEX_RUN_ID', 'reader-thread'); // harness file = state-harness-codex-reader-thread.json
 
     // Another client (Antigravity) is in a room and wrote its own PPID file.
     await fs.writeFile(
@@ -328,7 +340,7 @@ describe('readHarnessStateOrMerged — harness scope must not read other clients
     );
     // This harness has an empty harness file: it is in no room.
     await fs.writeFile(
-      join(dir, 'state-harness-codex.json'),
+      join(dir, 'state-harness-codex-reader-thread.json'),
       JSON.stringify({ version: 1, rooms: {}, blockStreak: 0 }),
     );
 
@@ -336,7 +348,7 @@ describe('readHarnessStateOrMerged — harness scope must not read other clients
     expect(Object.keys((await readHarnessStateOrMerged()).rooms)).toEqual([]);
   });
 
-  it('still falls back to merged when no harness file exists yet (pre-0.26.6 state)', async () => {
+  it('does not fall back to a legacy shared harness file for a thread-scoped reader', async () => {
     const dir = await makeStateDir('agent-room-harness-legacy-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CLAUDECODE', '');
@@ -344,7 +356,7 @@ describe('readHarnessStateOrMerged — harness scope must not read other clients
     vi.stubEnv('CODEX_RUN_ID', 'reader-thread');
 
     await fs.writeFile(
-      join(dir, 'state-99999.json'),
+      join(dir, 'state-harness-codex.json'),
       JSON.stringify({
         version: 1,
         rooms: { 'AV6-B7T-R6S': { name: 'Legacy', cursor: 1, joinedAt: 1 } },
@@ -352,7 +364,30 @@ describe('readHarnessStateOrMerged — harness scope must not read other clients
     );
 
     const { readHarnessStateOrMerged } = await import('../src/state.js');
-    expect(Object.keys((await readHarnessStateOrMerged()).rooms)).toEqual(['AV6-B7T-R6S']);
+    expect(Object.keys((await readHarnessStateOrMerged()).rooms)).toEqual([]);
+  });
+
+  it('keeps concurrent Codex threads in separate harness state files', async () => {
+    const dir = await makeStateDir('agent-room-harness-isolation-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_RUN_ID', 'room-a-thread');
+
+    await fs.writeFile(join(dir, 'state-harness-codex-room-a-thread.json'), JSON.stringify({
+      version: 1,
+      rooms: { 'AAA-BBB-CCC': { name: 'Room A', cursor: 1, joinedAt: 1, clientKind: 'codex', ownerRunId: 'room-a-thread' } },
+    }));
+
+    vi.stubEnv('CODEX_RUN_ID', 'room-b-thread');
+    vi.resetModules();
+    await fs.writeFile(join(dir, 'state-harness-codex-room-b-thread.json'), JSON.stringify({
+      version: 1,
+      rooms: { 'DDD-EEE-FFF': { name: 'Room B', cursor: 1, joinedAt: 2, clientKind: 'codex', ownerRunId: 'room-b-thread' } },
+    }));
+    const { readHarnessStateOrMerged: readB } = await import('../src/state.js');
+
+    expect(Object.keys((await readB()).rooms)).toEqual(['DDD-EEE-FFF']);
+    expect(await fs.readFile(join(dir, 'state-harness-codex-room-a-thread.json'), 'utf8')).toContain('AAA-BBB-CCC');
+    expect(await fs.readFile(join(dir, 'state-harness-codex-room-b-thread.json'), 'utf8')).toContain('DDD-EEE-FFF');
   });
 });
 

@@ -17,10 +17,28 @@ const STATE_FILE =
   process.env.AGENT_ROOM_STATE_FILE ||
   join(STATE_DIR, `state-${process.ppid ?? process.pid}.json`);
 
+function runScopedHarnessStateFile(kind: string): string | null {
+  if (process.env.AGENT_ROOM_STATE_FILE) return null;
+  const runId = harnessRunId();
+  if (!runId) return null;
+  // A harness file shared by every thread is not a useful canonical store:
+  // one thread can overwrite another thread's rooms, and every Stop hook can
+  // then see the wrong room. Keep the stable filename shape for the harness,
+  // but include the thread identity supplied by the harness.
+  const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return join(STATE_DIR, `state-harness-${kind}-${safeRunId}.json`);
+}
+
 function currentHarnessStateFile(): string | null {
   if (process.env.AGENT_ROOM_STATE_FILE) return null;
   const kind = detectHarness().kind;
   if (kind !== 'cursor' && kind !== 'codex') return null;
+  const scoped = runScopedHarnessStateFile(kind);
+  if (scoped) return scoped;
+  // Codex Desktop does not currently expose a run id in every integration.
+  // A shared Codex harness file is unsafe in that case: use the PPID-scoped
+  // STATE_FILE instead of broadcasting rooms to every desktop thread.
+  if (kind === 'codex') return null;
   return join(STATE_DIR, `state-harness-${kind}.json`);
 }
 
@@ -183,7 +201,7 @@ async function listStateFiles(): Promise<string[]> {
   try {
     const entries = await fs.readdir(STATE_DIR);
     files = entries
-      .filter((name) => /^state-(?:\d+|harness-[a-z-]+)\.json$/.test(name))
+      .filter((name) => /^state-(?:\d+|harness-[a-z-]+(?:-[a-zA-Z0-9._-]+)?)\.json$/.test(name))
       .map((name) => join(STATE_DIR, name));
   } catch {
     files = [];
@@ -233,6 +251,10 @@ export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
       .then(() => true)
       .catch(() => false);
     if (exists) return readStateFile(harnessFile);
+    // With a thread-scoped harness identity, an absent file means this
+    // thread has not joined a room. Never fall back to the legacy shared
+    // harness file: doing so reintroduces cross-thread Stop-hook injections.
+    if (runScopedHarnessStateFile(detectHarness().kind)) return cloneEmpty();
   }
   return readMergedState();
 }
