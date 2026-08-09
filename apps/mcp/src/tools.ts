@@ -39,7 +39,7 @@ import {
   ModeNotSupportedError,
   type RoomApiClient,
 } from './roomApi.js';
-import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
+import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace, startListenLease } from '@agent-room/shared';
 import type {
   Message,
   Participant,
@@ -455,8 +455,39 @@ async function readAttachmentText(a: MessageAttachment, maxChars: number): Promi
   };
 }
 
-/** Long-poll for new messages; shared by room_listen and post-join/create first listen. */
+/**
+ * Long-poll for new messages; shared by room_listen and post-join/create first listen.
+ *
+ * Owns the presence lease and nothing else — the polling itself lives in
+ * runRoomListenPollInner. The lease is renewed for as long as we are actually
+ * in the poll, and released in `finally`, so every way this call can end
+ * (message returned, quiet timeout, throw, process killed) stops advertising
+ * "Listening". Previously the full intended window was stamped once up front
+ * and never revisited, which is why a client that returned early or died kept
+ * showing a green dot for minutes.
+ */
 export async function runRoomListenPoll(
+  client: RoomApiClient,
+  code: string,
+  since: number,
+  timeoutMs: number,
+  selfName: string | undefined,
+): Promise<RoomListenPollResult> {
+  if (!selfName) {
+    return runRoomListenPollInner(client, code, since, timeoutMs, selfName);
+  }
+  const name = selfName;
+  const releaseLease = startListenLease(
+    (until) => setListenUntil(client, code, name, until),
+  );
+  try {
+    return await runRoomListenPollInner(client, code, since, timeoutMs, selfName);
+  } finally {
+    await releaseLease();
+  }
+}
+
+async function runRoomListenPollInner(
   client: RoomApiClient,
   code: string,
   since: number,
@@ -467,11 +498,6 @@ export async function runRoomListenPoll(
   const start = Date.now();
   const storedRoomState = selfName ? await readRoomStateForJoin(code, selfName) : undefined;
   let lastGameVersion = storedRoomState?.gameVersion;
-  if (selfName) {
-    try {
-      await setListenUntil(client, code, selfName, start + cappedMs);
-    } catch { /* presence is non-essential */ }
-  }
   // Quiet-phase backoff: 2s ticks for the first 30s (snappy replies + fast
   // room-ended detection), then ease toward 10s. A long-quiet room doesn't
   // need 2s granularity, and each tick is two API calls — across every seated

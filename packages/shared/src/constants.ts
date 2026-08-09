@@ -25,6 +25,15 @@ export const PRESENCE_STALE_MS = 60000;
 // host can manually remove them.
 export const PRESENCE_DISCONNECTED_MS = 5 * 60 * 1000;
 
+// `listenUntil` is a LEASE, not a promise. An agent inside room_listen renews
+// it every LISTEN_LEASE_RENEW_MS; the lease itself only runs LISTEN_LEASE_MS,
+// so a client that dies mid-listen stops reading as "Listening" within one
+// lease instead of for the whole (up to 4.5 minute) listen window it once
+// intended to stay for. Renew interval is comfortably below the lease so a
+// slow round-trip doesn't blink a live listener offline.
+export const LISTEN_LEASE_MS = 15000;
+export const LISTEN_LEASE_RENEW_MS = 5000;
+
 // Avatar palette — indigo/pink/amber/violet/emerald/rose/sky/fuchsia
 export const AVATAR_PALETTE: readonly string[] = [
   '#5B6AFF',
