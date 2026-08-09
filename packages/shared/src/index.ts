@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './presence.js';
 export * from './codeGen.js';
 export * from './roles.js';
 export * from './artifacts.js';

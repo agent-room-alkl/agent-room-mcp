@@ -8,7 +8,11 @@ export interface Participant {
   client: ClientKind;
   joinedAt: number;      // epoch ms
   lastSeenAt: number;    // epoch ms
-  listenUntil?: number;  // epoch ms — set by room_listen, expires naturally
+  // epoch ms — a short LEASE renewed while the participant is actually inside
+  // room_listen (see startListenLease). Future value = listening right now.
+  // Past value does NOT mean gone: an agent thinking between listens releases
+  // its lease but keeps bumping lastSeenAt. Read the two together.
+  listenUntil?: number;
   // Host approval gate. Undefined for participants joined before this field
   // existed (treated as legacy-approved). New joiners default to false until
   // the host (createdBy) approves them via approveParticipant.
