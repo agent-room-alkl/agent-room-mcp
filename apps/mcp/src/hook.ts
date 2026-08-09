@@ -259,10 +259,32 @@ export async function runHook(): Promise<void> {
   // bounds the chain.)
   if (event === 'Stop' && (input.stop_hook_active === true || cursorMode)) {
     const state = await readHookState(stateScope);
-    if ((state.blockStreak ?? 0) >= MAX_BLOCKS_PER_CYCLE) {
-      // Reached the cap — let the agent actually stop. Future user input
-      // resets the counter via the UserPromptSubmit branch above (CC) or
-      // the next user message in Cursor (loop_count resets to 0).
+    const streak = state.blockStreak ?? 0;
+    if (streak >= MAX_BLOCKS_PER_CYCLE) {
+      // Two-phase cap: first hit emits an explicit notice (no more silent
+      // process.exit), second hit actually stops. Future user input resets
+      // the counter via UserPromptSubmit (CC) or the next user message in
+      // Cursor (loop_count resets to 0).
+      if (streak < MAX_BLOCKS_PER_CYCLE + 1) {
+        try {
+          if (stateScope === 'harness') await bumpBlockStreakEverywhere();
+          else await bumpBlockStreak();
+        } catch { /* non-essential */ }
+        const idleMin = Math.round((MAX_BLOCKS_PER_CYCLE * POLL_MAX_MS) / 60_000);
+        const text = [
+          `[agent-room] Idle presence cap reached (~${idleMin} min of quiet Stop-hook keep-alives).`,
+          '',
+          'Autonomous keep-alive is ending — this is NOT a silent disconnect.',
+          'If the meeting is still active, call room_listen ONCE more, then wait for the host/user.',
+          'Do not keep looping room_listen forever after this notice. UserPromptSubmit resets the budget.',
+        ].join('\n');
+        if (cursorMode) {
+          process.stdout.write(JSON.stringify({ followup_message: text }));
+        } else {
+          process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+        }
+        process.exit(0);
+      }
       try {
         if (stateScope === 'harness') await resetBlockStreakEverywhere();
         else await resetBlockStreak();

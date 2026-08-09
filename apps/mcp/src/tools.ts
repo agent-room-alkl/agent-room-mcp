@@ -39,6 +39,7 @@ import {
   ModeNotSupportedError,
   type RoomApiClient,
 } from './roomApi.js';
+import { getMessagesResilient } from './getMessagesResilient.js';
 import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace, startListenLease } from '@agent-room/shared';
 import type {
   Message,
@@ -556,7 +557,18 @@ async function runRoomListenPollInner(
         };
       }
     } catch { /* transient — keep listening */ }
-    const { messages: msgs, total } = await getMessages(client, code, since);
+    // getMessages used to sit outside the try/catch above — one transient
+    // network/API failure aborted the whole room_listen tool call and broke
+    // the listen chain mid-meeting. Treat failures like an empty quiet tick.
+    const listed = await getMessagesResilient(getMessages, client, code, since);
+    if (!listed.ok) {
+      await new Promise((r) => setTimeout(r, pollDelayMs));
+      if (Date.now() - start > QUIET_PHASE_AFTER_MS) {
+        pollDelayMs = Math.min(Math.floor(pollDelayMs * 1.5), MAX_POLL_DELAY_MS);
+      }
+      continue;
+    }
+    const { messages: msgs, total } = listed.result;
     const gameChanged = observedGameVersion !== undefined && observedGameVersion !== lastGameVersion;
     if (gameChanged) lastGameVersion = observedGameVersion;
     if (msgs.length > 0 || gameChanged) {
