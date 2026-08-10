@@ -5,9 +5,35 @@ import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+/** MCP server entry written into every client's config. */
 const MCP_ENTRY = {
   command: 'npx',
   args: ['-y', 'agent-room-mcp'],
+};
+
+/** Claude Code's entry, which additionally self-identifies (T-18).
+ *
+ * `detectHarness` keys off `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`, but the MCP
+ * server runs as a spawned child and those markers were not reaching it, so
+ * detection returned `unknown`. `unknown` is deliberately conservative: it
+ * falls back to `state-${ppid}.json`, i.e. room state keyed to the PROCESS.
+ * Codex and Cursor survive that because their host process is long-lived; a
+ * Claude Code process is roughly one per turn, so every new PID read a
+ * different, empty state file and had no idea it was still in a room. From the
+ * room's side that looks exactly like "Claude keeps disconnecting".
+ *
+ * Codex's config has always self-identified (it passes CODEX_HOME in argv);
+ * this does the same for Claude Code instead of hoping the variable is
+ * inherited.
+ *
+ * Deliberately NOT folded into MCP_ENTRY: that object is also written into
+ * Cursor / Gemini / Antigravity configs, and detectHarness tests CLAUDECODE
+ * FIRST — a global marker would make every one of those clients report itself
+ * as claude-code.
+ */
+const CLAUDE_CODE_MCP_ENTRY = {
+  ...MCP_ENTRY,
+  env: { CLAUDECODE: '1' },
 };
 
 const HOOK_COMMAND = 'npx -y agent-room-mcp hook';
@@ -262,7 +288,7 @@ async function installClaudeCode(opts: { hooks: boolean }): Promise<InstallResul
   const mcp = (await readJson(mcpPath)) ?? {};
   const servers = ((mcp.mcpServers as Record<string, unknown>) ?? {});
   const before = JSON.stringify(servers['agent-room']);
-  servers['agent-room'] = MCP_ENTRY;
+  servers['agent-room'] = CLAUDE_CODE_MCP_ENTRY;
   mcp.mcpServers = servers;
   if (JSON.stringify(servers['agent-room']) !== before) {
     await writeJsonAtomic(mcpPath, mcp);
