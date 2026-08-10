@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // T-18. Claude Code was dropping out of rooms because detectHarness returned
 // 'unknown' — the MCP server is a spawned child and CLAUDECODE /
@@ -11,7 +12,12 @@ import { join } from 'node:path';
 // These assert the shape of the config `init` writes, on source, because the
 // installers write to real home-directory paths and the interesting property is
 // "which entry goes into which client's file", not the file I/O.
-const SRC = readFileSync(join(process.cwd(), 'apps/mcp/src/init.ts'), 'utf8');
+// Resolve from this test file so both `npm -w apps/mcp test` and repo-root
+// `vitest run apps/mcp/test/...` find the same source.
+const SRC = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '../src/init.ts'),
+  'utf8',
+);
 
 describe('T-18: Claude Code self-identifies to the MCP server', () => {
   it('declares CLAUDECODE on the Claude Code entry', () => {
