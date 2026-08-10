@@ -324,6 +324,34 @@ async function readMessagesAtHead(client: RoomApiClient, code: string): Promise<
   return { messages, cursor: total ?? messages.length };
 }
 
+/**
+ * A send can race with messages arriving after the last listen.  The send
+ * response still advances this session's cursor past its own message, so
+ * return the messages that were unread before the send as part of the send
+ * response.  Otherwise advancing to the head silently loses them.
+ */
+export function messagesToReturnAfterSend(
+  messages: Message[],
+  name: string,
+  ownMessageId: number,
+): Message[] {
+  return messages.filter((message) => !(message.client === 'cc' && message.name === name && message.id === ownMessageId));
+}
+
+export async function unreadMessagesBeforeSend(
+  client: RoomApiClient,
+  code: string,
+  name: string,
+  ownMessageId: number,
+  priorCursor: number | undefined,
+): Promise<Message[]> {
+  // Missing local state must not recreate the silent-loss bug. Start at the
+  // oldest retained message; this may replay history, but replay is visible
+  // and recoverable whereas dropping a message is not.
+  const { messages } = await getMessages(client, code, priorCursor ?? 0);
+  return messagesToReturnAfterSend(messages, name, ownMessageId);
+}
+
 // Best-effort compact task-board snapshot appended to listen results, so an
 // agent glances at the board every cycle (the "时不时看一眼" nudge) without a
 // separate room_task_list call.
@@ -1261,6 +1289,7 @@ export function registerTools(server: Server) {
         time: Date.now(),
         ...(attachments.length > 0 ? { attachments } : {}),
       };
+      const priorCursor = (await readRoomStateForJoin(a.code, a.name))?.cursor;
       let appendResult: Awaited<ReturnType<typeof appendMessage>>;
       // Sending as the host requires the hostKey; the server ignores it for
       // any other sender name. The grace-preemption sys message (when a
@@ -1291,7 +1320,14 @@ export function registerTools(server: Server) {
         }
         throw e;
       }
-      const { messages: msgs, cursor: currentCursor } = await readMessagesAtHead(client, a.code);
+      const { cursor: currentCursor } = await readMessagesAtHead(client, a.code);
+      const missedMessages = await unreadMessagesBeforeSend(
+        client,
+        a.code,
+        a.name,
+        msg.id,
+        priorCursor,
+      );
       // Advance cursor past our own message so the Stop hook does not re-inject it.
       await updateCursor(a.code, currentCursor);
       // Record send-time so the Stop hook will hold briefly waiting for a reply.
@@ -1306,6 +1342,7 @@ export function registerTools(server: Server) {
           appended: false,
           reason: 'no_addition',
           cursor: currentCursor,
+          ...(missedMessages.length > 0 ? { messages: missedMessages } : {}),
           metadata: appendResult.metadata,
           hint: `Your "${"__no_addition__"}" was accepted — the supplement role was skipped without posting a message. ${nextListenContract(a.code, currentCursor)}`,
         });
@@ -1314,6 +1351,7 @@ export function registerTools(server: Server) {
         sent: true,
         appended: true,
         cursor: currentCursor,
+        ...(missedMessages.length > 0 ? { messages: missedMessages } : {}),
         ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
         ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
         hint: `Sent. ${nextListenContract(a.code, currentCursor)}`,
@@ -1352,6 +1390,7 @@ export function registerTools(server: Server) {
         client: 'cc',
         time: Date.now(),
       };
+      const priorCursor = (await readRoomStateForJoin(a.code, statusName))?.cursor;
       let appendResult: Awaited<ReturnType<typeof appendMessage>>;
       try {
         // kind='status': posts a status-tagged message; never advances the
@@ -1378,6 +1417,13 @@ export function registerTools(server: Server) {
         throw e;
       }
       const { cursor: currentCursor } = await readMessagesAtHead(client, a.code);
+      const missedMessages = await unreadMessagesBeforeSend(
+        client,
+        a.code,
+        statusName,
+        msg.id,
+        priorCursor,
+      );
       await updateCursor(a.code, currentCursor);
       await markSent(a.code, Date.now());
       const extended = appendResult.metadata?.extendsTurn === true;
@@ -1385,6 +1431,7 @@ export function registerTools(server: Server) {
         sent: true,
         appended: true,
         cursor: currentCursor,
+        ...(missedMessages.length > 0 ? { messages: missedMessages } : {}),
         extendsTurn: extended,
         ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
         ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
