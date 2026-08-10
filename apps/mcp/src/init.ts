@@ -31,6 +31,81 @@ export function countInstalledCodexHookCommands(toml: string): number {
   return toml.match(HOOK_COMMAND_LINE_RE)?.length ?? 0;
 }
 
+const HOOK_BLOCK_HEADER_RE = /^\[\[hooks\.(Stop|UserPromptSubmit|SessionStart)\]\][ \t]*$/;
+
+/**
+ * Drop duplicate agent-room hook blocks, keeping the FIRST of each event.
+ *
+ * Detecting duplicates was not enough. Before the regex above existed, `init`
+ * failed to recognise a differently-spelled hook and appended a second full set
+ * of blocks; the fix taught it to *detect* that, and then it printed "remove
+ * the extra [[hooks.*]] blocks by hand" and left them there. Nobody does that
+ * by hand, so the duplicates outlived the fix — still present on Robin's
+ * machine on 2026-08-10, five days later, silently breaking Codex's room
+ * presence the whole time.
+ *
+ * Why it breaks presence rather than merely double-firing: Codex trusts hooks
+ * per entry, keyed by position (`config.toml:stop:0:0`). Only the first block
+ * of each event carries a `trusted_hash`; a duplicate lands at index 1 with no
+ * trust record, hits the trust gate, and the Stop hook does not run — so
+ * nothing re-arms `room_listen` and the agent silently drops out of the room at
+ * the end of its turn.
+ *
+ * Keeping the FIRST occurrence is what makes this safe: index 0 is exactly the
+ * entry the existing `[hooks.state]` trust records point at, so removing the
+ * later ones preserves trust instead of invalidating it. We never touch
+ * `[hooks.state]` itself — re-trusting is Codex's own security gate to run, and
+ * forging a trusted_hash is not ours to do.
+ */
+export function dedupeCodexHookBlocks(toml: string): { toml: string; removed: string[] } {
+  const isHookCommandLine = (line: string): boolean =>
+    new RegExp(HOOK_COMMAND_LINE_RE.source, 'm').test(line);
+
+  const lines = toml.split('\n');
+  const kept = new Set<string>();
+  const removed: string[] = [];
+  const out: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!.match(HOOK_BLOCK_HEADER_RE);
+    if (!header) {
+      out.push(lines[i]!);
+      continue;
+    }
+    const event = header[1]!;
+
+    // The block runs to the next top-level table header — except its own
+    // nested `[[hooks.<Event>.hooks]]`, which belongs to it.
+    const block: string[] = [lines[i]!];
+    let end = i + 1;
+    for (; end < lines.length; end++) {
+      const line = lines[end]!;
+      if (line.startsWith('[')) {
+        if (line.trim() !== `[[hooks.${event}.hooks]]`) break;
+      }
+      block.push(line);
+    }
+    i = end - 1;
+
+    // Only ever remove OUR hook's blocks. Someone else's [[hooks.Stop]] is
+    // none of our business and must survive untouched.
+    if (!block.some(isHookCommandLine)) {
+      out.push(...block);
+      continue;
+    }
+
+    if (kept.has(event)) {
+      while (block.length > 0 && block[block.length - 1]!.trim() === '') block.pop();
+      removed.push(block.join('\n'));
+      continue;
+    }
+    kept.add(event);
+    out.push(...block);
+  }
+
+  return { toml: out.join('\n'), removed };
+}
+
 // Markers used to make the rules-injection idempotent. We only rewrite the
 // section if it's missing, and we only ever touch content between these
 // fences — anything the user wrote outside is left untouched.
@@ -608,13 +683,23 @@ export async function installCodex(opts: { hooks: boolean }): Promise<InstallRes
       }
     }
 
+    // Clean up duplicates BEFORE deciding whether anything is installed. A
+    // duplicate block is not a cosmetic wart: it lands at an index with no
+    // trust record, trips Codex's per-entry trust gate, and stops the Stop hook
+    // running at all — which is exactly how an agent silently drops out of a
+    // room at the end of its turn.
+    const deduped = dedupeCodexHookBlocks(modified);
+    if (deduped.removed.length > 0) {
+      modified = deduped.toml;
+      result.changes.push(
+        `removed ${deduped.removed.length} duplicate agent-room hook block(s) from ${path} ` +
+        `(kept the first of each event, so the existing [hooks.state] trust records still apply)`,
+      );
+    }
+
     const installedHookCommands = countInstalledCodexHookCommands(modified);
     if (installedHookCommands > 0) {
-      result.unchanged.push(
-        installedHookCommands > HOOK_EVENTS.length
-          ? `${path} (hooks already installed — ${installedHookCommands} hook commands found for ${HOOK_EVENTS.length} events; duplicates will each run on every event, remove the extra [[hooks.*]] blocks by hand)`
-          : `${path} (hooks already installed)`,
-      );
+      result.unchanged.push(`${path} (hooks already installed)`);
     } else {
       for (const event of HOOK_EVENTS) {
         modified = ensureTrailingBlankLine(modified);

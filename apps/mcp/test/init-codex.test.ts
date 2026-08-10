@@ -105,12 +105,82 @@ describe('installCodex — duplicate hook detection', () => {
     expect(twice).toBe(once);
   });
 
-  it('reports duplicates when the config already has more hook commands than events', async () => {
+  it('removes duplicate hook blocks instead of telling the user to do it by hand', async () => {
     await installCodex({ hooks: true });
     const doubled = (await readFile(configPath(), 'utf8')).repeat(2);
     await writeFile(configPath(), doubled, 'utf8');
 
     const result = await installCodex({ hooks: true });
-    expect(result.unchanged.some((u) => u.includes('duplicates will each run'))).toBe(true);
+    const toml = await readFile(configPath(), 'utf8');
+
+    expect(countInstalledCodexHookCommands(toml)).toBe(3);
+    expect(result.changes.some((c) => c.includes('duplicate agent-room hook block'))).toBe(true);
+  });
+
+  // The 2026-08-10 shape from Robin's machine: an older init wrote the bare
+  // command, a newer one wrote the CODEX_HOME-prefixed variant, and both sets
+  // survived. [hooks.state] only carries trust for index 0, so the second set
+  // was untrusted — the Stop hook never ran, nothing re-armed room_listen, and
+  // Codex silently left the room at the end of every turn.
+  it('keeps the FIRST block of each event so the existing trust records still apply', async () => {
+    const real = [
+      '[features]',
+      'codex_hooks = true',
+      '',
+      '[[hooks.Stop]]',
+      'matcher = ""',
+      '[[hooks.Stop.hooks]]',
+      'type = "command"',
+      'command = "env CODEX_HOME=/Users/robin/.codex npx -y agent-room-mcp hook"',
+      '',
+      '[hooks.state]',
+      '',
+      '[hooks.state."/Users/robin/.codex/config.toml:stop:0:0"]',
+      'trusted_hash = "sha256:15e63bd3"',
+      '',
+      '[[hooks.Stop]]',
+      'matcher = ""',
+      '[[hooks.Stop.hooks]]',
+      'type = "command"',
+      'command = "npx -y agent-room-mcp hook"',
+      '',
+    ].join('\n');
+    await writeFile(configPath(), real, 'utf8');
+
+    await installCodex({ hooks: true });
+    const toml = await readFile(configPath(), 'utf8');
+
+    // The trusted spelling survived; the untrusted duplicate is gone.
+    expect(toml).toContain('command = "env CODEX_HOME=/Users/robin/.codex npx -y agent-room-mcp hook"');
+    expect(toml).not.toContain('command = "npx -y agent-room-mcp hook"');
+    // Trust records are Codex's own security state — we never rewrite them.
+    expect(toml).toContain('[hooks.state."/Users/robin/.codex/config.toml:stop:0:0"]');
+    expect(toml).toContain('trusted_hash = "sha256:15e63bd3"');
+  });
+
+  it('leaves somebody else\'s hooks alone', async () => {
+    const foreign = [
+      '[[hooks.Stop]]',
+      'matcher = ""',
+      '[[hooks.Stop.hooks]]',
+      'type = "command"',
+      'command = "some-other-tool --on-stop"',
+      '',
+      '[[hooks.Stop]]',
+      'matcher = ""',
+      '[[hooks.Stop.hooks]]',
+      'type = "command"',
+      'command = "some-other-tool --on-stop"',
+      '',
+    ].join('\n');
+    await writeFile(configPath(), foreign, 'utf8');
+
+    await installCodex({ hooks: true });
+    const toml = await readFile(configPath(), 'utf8');
+
+    // Both foreign blocks survive — duplicated or not, they are not ours.
+    expect(toml.match(/command = "some-other-tool --on-stop"/g)).toHaveLength(2);
+    // And our own hooks were installed, since none were present before.
+    expect(countInstalledCodexHookCommands(toml)).toBe(3);
   });
 });
