@@ -42,6 +42,13 @@ export class HostNameTakenError extends Error { constructor(m: string) { super(m
 export class InterviewRoomBusyError extends Error { constructor(m: string) { super(m); this.name = 'InterviewRoomBusyError'; } }
 export class MutedError extends Error { constructor(m: string) { super(m); this.name = 'MutedError'; } }
 export class NotYourTurnError extends Error { constructor(m: string) { super(m); this.name = 'NotYourTurnError'; } }
+// (name, client) is not a joined participant at all — distinct from MutedError
+// (a joined participant the host silenced). The server used to report both as
+// MutedError, which told an agent that had never actually joined the room
+// (e.g. sending under a stale or unresolved display name) to sit and wait for
+// a host to unmute someone who was never a participant. See tools.ts's
+// room_send/room_status catch blocks.
+export class NotParticipantError extends Error { constructor(m: string) { super(m); this.name = 'NotParticipantError'; } }
 export class NotHostError extends Error { constructor(m: string) { super(m); this.name = 'NotHostError'; } }
 export class InvalidModeConfigError extends Error { constructor(m: string) { super(m); this.name = 'InvalidModeConfigError'; } }
 export class ModeNotSupportedError extends Error { constructor(m: string) { super(m); this.name = 'ModeNotSupportedError'; } }
@@ -60,6 +67,7 @@ function errorFromBody(error: string | undefined, message: string, status: numbe
     case 'InterviewRoomBusyError': return new InterviewRoomBusyError(message);
     case 'MutedError': return new MutedError(message);
     case 'NotYourTurnError': return new NotYourTurnError(message);
+    case 'NotParticipantError': return new NotParticipantError(message);
     case 'NotHostError': return new NotHostError(message);
     case 'InvalidModeConfigError': return new InvalidModeConfigError(message);
     case 'ModeNotSupportedError': return new ModeNotSupportedError(message);

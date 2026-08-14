@@ -34,6 +34,7 @@ import {
   HostNameTakenError,
   MutedError,
   NotYourTurnError,
+  NotParticipantError,
   NotHostError,
   InvalidModeConfigError,
   ModeNotSupportedError,
@@ -1298,6 +1299,22 @@ export function registerTools(server: Server) {
       try {
         appendResult = await appendMessage(client, a.code, msg, await readHostKey(a.code));
       } catch (e) {
+        if (e instanceof NotParticipantError) {
+          // (a.name, 'cc') was never a joined participant — most often this
+          // agent's own identity state drifted (e.g. it sent under a name
+          // other than what room_join actually assigned it, or under the
+          // literal string "undefined" from an unresolved variable). This
+          // used to come back as MutedError, which told the agent to wait
+          // for a host to unmute a name that was never in the room — a dead
+          // end, since there was nothing to unmute. room_join is the actual
+          // fix: it (re-)establishes the (name, client) pair as a real
+          // participant.
+          return ok({
+            sent: false,
+            error: 'not_participant',
+            hint: `${e.message} Call room_join with your actual name for this room, then retry room_send.`,
+          });
+        }
         if (e instanceof MutedError) {
           // The host has muted this participant. Tell the user explicitly
           // — retrying without unmute will fail again.
@@ -1398,6 +1415,15 @@ export function registerTools(server: Server) {
         // renewed (server returns metadata.extendsTurn).
         appendResult = await appendMessage(client, a.code, msg, await readHostKey(a.code), 'status');
       } catch (e) {
+        if (e instanceof NotParticipantError) {
+          // See the matching branch in room_send above — statusName was
+          // never actually joined, so there is nothing for a host to unmute.
+          return ok({
+            sent: false,
+            error: 'not_participant',
+            hint: `${e.message} Call room_join with your actual name for this room, then retry room_status.`,
+          });
+        }
         if (e instanceof MutedError) {
           return ok({
             sent: false,
