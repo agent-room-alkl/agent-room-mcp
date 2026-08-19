@@ -427,3 +427,69 @@ describe('claimRoomSessionEverywhere — stamps only the caller\'s own records',
     expect(after.rooms['AV6-B7T-R6S'].sessionKey).toBeUndefined();
   });
 });
+
+// PID-scoped state files are per MCP-server process and every one of them is
+// left behind at exit — 65 had piled up on Robin's machine by 2026-08-19, and
+// readMergedState reads all of them on every Stop hook.
+describe('reapStaleStateFiles', () => {
+  const DEAD_PID = 999999; // above the default pid_max on macOS/Linux
+  const state = (rooms: AgentRoomState['rooms']): string =>
+    JSON.stringify({ version: 1, rooms, blockStreak: 0 });
+
+  async function seed(dir: string, name: string, body: string, mtime?: Date) {
+    const file = join(dir, name);
+    await fs.writeFile(file, body, 'utf8');
+    if (mtime) await fs.utimes(file, mtime, mtime);
+    return file;
+  }
+
+  it('removes empty state files whose owning process is gone', async () => {
+    const dir = await makeStateDir('agent-room-reap-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', '');
+    const { reapStaleStateFiles } = await import('../src/state.js');
+
+    await seed(dir, `state-${DEAD_PID}.json`, state({}));
+    expect(await reapStaleStateFiles()).toBe(1);
+    await expect(fs.access(join(dir, `state-${DEAD_PID}.json`))).rejects.toThrow();
+  });
+
+  it('keeps a dead session that still holds rooms, so a restart can recover it', async () => {
+    const dir = await makeStateDir('agent-room-reap-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', '');
+    const { reapStaleStateFiles } = await import('../src/state.js');
+
+    const file = await seed(dir, `state-${DEAD_PID}.json`, state({
+      'GX4-N33-GD4': { name: 'Claude', cursor: 77, joinedAt: 1 },
+    }));
+    expect(await reapStaleStateFiles()).toBe(0);
+    await expect(fs.access(file)).resolves.toBeUndefined();
+  });
+
+  it('drops a dead session with rooms once it is past the grace window', async () => {
+    const dir = await makeStateDir('agent-room-reap-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', '');
+    const { reapStaleStateFiles } = await import('../src/state.js');
+
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    await seed(dir, `state-${DEAD_PID}.json`, state({
+      'GX4-N33-GD4': { name: 'Claude', cursor: 77, joinedAt: 1 },
+    }), old);
+    expect(await reapStaleStateFiles()).toBe(1);
+  });
+
+  it('never touches a live process, this one included', async () => {
+    const dir = await makeStateDir('agent-room-reap-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', '');
+    const { reapStaleStateFiles } = await import('../src/state.js');
+
+    const live = await seed(dir, `state-${process.pid}.json`, state({}));
+    const harness = await seed(dir, 'state-harness-codex.json', state({}));
+    expect(await reapStaleStateFiles()).toBe(0);
+    await expect(fs.access(live)).resolves.toBeUndefined();
+    await expect(fs.access(harness)).resolves.toBeUndefined();
+  });
+});

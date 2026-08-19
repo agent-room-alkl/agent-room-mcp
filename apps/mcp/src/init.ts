@@ -30,6 +30,13 @@ const MCP_ENTRY = {
  * Cursor / Gemini / Antigravity configs, and detectHarness tests CLAUDECODE
  * FIRST — a global marker would make every one of those clients report itself
  * as claude-code.
+ *
+ * Written into BOTH Claude config files. The first cut of this only patched
+ * ~/.claude.json, which left the desktop app — whose Code surface reads
+ * claude_desktop_config.json and spawns the server through Claude.app's own
+ * helper — still handing the MCP process a bare environment. Detection there
+ * kept returning 'unknown' and rooms kept dropping, which is the exact bug this
+ * entry exists to fix, just on the other surface.
  */
 const CLAUDE_CODE_MCP_ENTRY = {
   ...MCP_ENTRY,
@@ -467,7 +474,7 @@ async function installClaude(opts: { hooks: boolean }): Promise<InstallResult> {
   const config = (await readJson(path)) ?? {};
   const servers = ((config.mcpServers as Record<string, unknown>) ?? {});
   const before = JSON.stringify(servers['agent-room']);
-  servers['agent-room'] = MCP_ENTRY;
+  servers['agent-room'] = CLAUDE_CODE_MCP_ENTRY;
   config.mcpServers = servers;
 
   if (JSON.stringify(servers['agent-room']) !== before) {
@@ -769,6 +776,9 @@ function printRulesInstruction(target: string, where: string): void {
 
 function printConfigs() {
   const mcp = JSON.stringify({ mcpServers: { 'agent-room': MCP_ENTRY } }, null, 2);
+  // Both Claude surfaces get the self-identifying entry — a hand-copied config
+  // without the marker is the same silent-dropout bug as one written by init.
+  const claudeMcp = JSON.stringify({ mcpServers: { 'agent-room': CLAUDE_CODE_MCP_ENTRY } }, null, 2);
   const hooks = JSON.stringify({
     hooks: Object.fromEntries(
       HOOK_EVENTS.map((e) => [e, [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }]])
@@ -780,9 +790,9 @@ function printConfigs() {
   // under one heading — same product, two write paths.
   console.log('\n--- Claude Code ---');
   console.log('~/.claude.json (Claude Code CLI — global user scope, not project .mcp.json):');
-  console.log(mcp);
+  console.log(claudeMcp);
   console.log(`\n${claudeDesktopConfigPath()} (Claude desktop app — global, macOS/Windows/Linux):`);
-  console.log(mcp);
+  console.log(claudeMcp);
   console.log('\n~/.claude/settings.json (autonomous-chat hooks — used by both surfaces):');
   console.log(hooks);
 
