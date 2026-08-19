@@ -46,6 +46,40 @@ const KNOWN_STRONG_LOOP: HarnessInfo[] = [
   { kind: 'codex', needsPersistenceSetup: false, label: 'Codex', maxListenMs: STRONG_MAX_LISTEN_MS },
 ];
 
+/** Claude Code running inside the Claude desktop app.
+ *
+ * Same agent runtime as the CLI, same stop hooks — so the KIND must stay
+ * 'claude-code'. Room state is partitioned by kind, and the desktop app writes
+ * rooms from its MCP server while the CLI-side hook reads them back; handing
+ * the two surfaces different kinds is exactly the mismatch that made agents
+ * drop out of every room (0.26.19).
+ *
+ * What DOES differ is the transport: the desktop app times out long MCP tool
+ * calls where the CLI does not. Measured 2026-08-19 — a 240s room_listen fails
+ * with "Request timed out", 45s returns cleanly. Before 0.26.19 this surface
+ * mis-detected as 'unknown' and got the weak cap by accident; self-identifying
+ * as Claude Code handed it the 270s strong cap it cannot actually sustain.
+ *
+ * maxListenMs takes no part in ownership checks, so it is safe to vary per
+ * surface while the kind stays fixed.
+ */
+const CLAUDE_CODE_DESKTOP: HarnessInfo = {
+  kind: 'claude-code',
+  needsPersistenceSetup: false,
+  label: 'Claude Code (desktop app)',
+  maxListenMs: WEAK_MAX_LISTEN_MS,
+};
+
+/** True when this Claude Code process is the desktop app rather than the CLI.
+ *  `CLAUDE_CODE_ENTRYPOINT` is 'claude-desktop' there and 'cli' in a terminal;
+ *  the two Claude-desktop markers are checked as a fallback for hosts that set
+ *  them without an entrypoint. */
+function isClaudeDesktopSurface(env: NodeJS.ProcessEnv): boolean {
+  const entrypoint = (env.CLAUDE_CODE_ENTRYPOINT ?? '').toLowerCase();
+  if (entrypoint.includes('desktop')) return true;
+  return Boolean(env.CLAUDE_DESKTOP_VERSION) || env.__CFBundleIdentifier === 'com.anthropic.claudefordesktop';
+}
+
 export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo {
   // Order matters: most specific signals first. Each branch keys off a
   // single env var the host harness is documented to set. Conservative
@@ -53,7 +87,7 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
   // weak-loop (user gets a setup nudge, low downside).
 
   if (env.CLAUDECODE === '1' || env.CLAUDE_CODE_ENTRYPOINT) {
-    return KNOWN_STRONG_LOOP[0]!;
+    return isClaudeDesktopSurface(env) ? CLAUDE_CODE_DESKTOP : KNOWN_STRONG_LOOP[0]!;
   }
   if (env.CODEX_RUN_ID || (env.CODEX_HOME && !env.CLAUDECODE)) {
     return KNOWN_STRONG_LOOP[1]!;
@@ -74,8 +108,12 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
   // The Claude desktop app embeds the same Code/Cowork agent runtime as the
   // CLI — surface differs, product is the same. Label as `Claude Code` so
   // hint copy stays consistent across surfaces.
-  if (env.CLAUDE_DESKTOP_VERSION || env.__CFBundleIdentifier === 'com.anthropic.claudefordesktop') {
-    return { kind: 'claude-desktop', needsPersistenceSetup: false, label: 'Claude Code', maxListenMs: STRONG_MAX_LISTEN_MS };
+  if (isClaudeDesktopSurface(env)) {
+    // Reached when the desktop app is detected without a Claude Code marker.
+    // Deliberately the same profile as the branch above: a distinct
+    // 'claude-desktop' kind would partition room state away from the
+    // 'claude-code' the stop hook resolves, reintroducing the silent dropout.
+    return CLAUDE_CODE_DESKTOP;
   }
   if (env.CLINE_VERSION) {
     return { kind: 'cline', needsPersistenceSetup: true, label: 'Cline', maxListenMs: WEAK_MAX_LISTEN_MS };

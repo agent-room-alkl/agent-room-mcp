@@ -33,9 +33,18 @@ describe('T-18: Claude Code self-identifies to the MCP server', () => {
   // claude_desktop_config.json, not ~/.claude.json, and spawns the MCP server
   // through Claude.app's own helper. Writing the marker to only one of the two
   // files left the desktop app reporting 'unknown' and dropping out of rooms.
-  it('writes that entry into the desktop app config too', () => {
+  it('writes a marked entry into the desktop app config too', () => {
     const desktopBlock = SRC.slice(SRC.indexOf('async function installClaude(opts:'));
-    expect(desktopBlock.slice(0, 600)).toContain("servers['agent-room'] = CLAUDE_CODE_MCP_ENTRY;");
+    expect(desktopBlock.slice(0, 600)).toContain("servers['agent-room'] = CLAUDE_DESKTOP_MCP_ENTRY;");
+  });
+
+  // The desktop entry carries the SAME CLAUDECODE marker (kind must stay
+  // claude-code so the stop hook matches) plus the entrypoint that tells
+  // detectHarness to use the shorter listen cap that surface can sustain.
+  it('tells the server which Claude Code surface it is', () => {
+    expect(SRC).toMatch(
+      /const CLAUDE_DESKTOP_MCP_ENTRY = \{[\s\S]*?env: \{ CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' \}[\s\S]*?\};/,
+    );
   });
 
   // `init print` is what users hand-copy when the installer cannot write for
@@ -44,7 +53,8 @@ describe('T-18: Claude Code self-identifies to the MCP server', () => {
     const printBlock = SRC.slice(SRC.indexOf('function printConfigs()'));
     const claudeSection = printBlock.slice(0, printBlock.indexOf('--- Cursor'));
     expect(claudeSection).toContain('CLAUDE_CODE_MCP_ENTRY');
-    expect(claudeSection.match(/console\.log\(claudeMcp\)/g)?.length).toBe(2);
+    expect(claudeSection).toContain('console.log(claudeMcp)');      // ~/.claude.json
+    expect(claudeSection).toContain('console.log(claudeDesktopMcp)'); // desktop app
   });
 
   // The regression that matters more than the fix: detectHarness checks
