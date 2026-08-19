@@ -94,7 +94,22 @@ export function roomBelongsToSession(
   sessionKey: string | undefined,
 ): boolean {
   const currentKind = detectHarness().kind;
-  if (room.clientKind && room.clientKind !== currentKind) return false;
+  // `unknown` on either side is a DETECTION FAILURE, not evidence that the room
+  // belongs to somebody else — so it must not disqualify the room. Observed
+  // 2026-08-19: the Claude desktop app spawns the MCP server from
+  // claude_desktop_config.json, which carried no CLAUDECODE marker, so the
+  // server stamped rooms `clientKind: 'unknown'`; the Stop hook is spawned by
+  // Claude Code itself, sees CLAUDECODE=1, and resolved 'claude-code'. The two
+  // never matched, this check rejected every room, the hook stayed silent, and
+  // the agent silently dropped out one turn after joining.
+  //
+  // Fail OPEN on `unknown` specifically. Two *known* kinds still partition (a
+  // Codex thread never picks up a Cursor room), and `sessionKey` / `ownerRunId`
+  // below remain the real ownership checks. The downside of being wrong here is
+  // one spurious keep-alive; the downside of being wrong the other way is the
+  // agent dropping out of every room, which is what we had.
+  const kindKnown = currentKind !== 'unknown' && room.clientKind !== 'unknown';
+  if (room.clientKind && kindKnown && room.clientKind !== currentKind) return false;
   const currentRunId = harnessRunId();
   if (room.ownerRunId && currentRunId && room.ownerRunId !== currentRunId) return false;
   if (!room.sessionKey) return true; // unclaimed / pre-sessionKey state; caller may claim it
@@ -268,10 +283,80 @@ async function writeStateFile(file: string, state: AgentRoomState): Promise<void
   await fs.rename(tmp, file);
 }
 
+/** Age after which a dead session's state file is discarded even if it still
+ *  lists rooms. Long enough that `readRoomStateForJoin` can still recover a
+ *  name / cursor after a crash-and-restart, short enough that the directory
+ *  does not grow without bound. */
+const STALE_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    // Signal 0 performs the permission/existence check without delivering
+    // anything. EPERM means the process exists but is owned by someone else.
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Delete `state-<pid>.json` files left behind by sessions that are gone.
+ *
+ * PID-scoped state is per MCP-server process, and every one of them leaks its
+ * file at exit — 65 had accumulated on Robin's machine by 2026-08-19. They are
+ * not merely clutter: `readMergedState` reads every one of them on each hook
+ * run, so the cost of a stale file is paid on every Stop.
+ *
+ * Conservative on purpose: a file is only removed when its owning PID is dead
+ * AND it either lists no rooms or is older than STALE_STATE_MAX_AGE_MS. A dead
+ * session that still holds rooms is exactly what a restart wants to recover
+ * from, so it is kept for the grace window.
+ */
+export async function reapStaleStateFiles(now = Date.now()): Promise<number> {
+  if (process.env.AGENT_ROOM_STATE_FILE) return 0;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(STATE_DIR);
+  } catch {
+    return 0;
+  }
+
+  let reaped = 0;
+  for (const name of entries) {
+    const match = /^state-(\d+)\.json$/.exec(name);
+    if (!match) continue;
+    const file = join(STATE_DIR, name);
+    if (file === STATE_FILE) continue;
+    if (pidIsAlive(Number(match[1]))) continue;
+    try {
+      const stat = await fs.stat(file);
+      const state = await readStateFile(file);
+      const empty = Object.keys(state.rooms).length === 0;
+      if (!empty && now - stat.mtimeMs < STALE_STATE_MAX_AGE_MS) continue;
+      await fs.unlink(file);
+      reaped++;
+    } catch {
+      // Racing with another process's write or unlink — leave it for next time.
+    }
+  }
+  return reaped;
+}
+
+// Reaping scans the whole directory, so do it once per process rather than on
+// every write. Fire-and-forget: a failed sweep must never fail a room action.
+let reapStarted = false;
+function reapStaleStateFilesOnce(): void {
+  if (reapStarted) return;
+  reapStarted = true;
+  void reapStaleStateFiles().catch(() => {});
+}
+
 async function writeState(state: AgentRoomState): Promise<void> {
   await writeStateFile(STATE_FILE, state);
   const harnessFile = currentHarnessStateFile();
   if (harnessFile) await writeStateFile(harnessFile, state);
+  reapStaleStateFilesOnce();
 }
 
 

@@ -96,6 +96,51 @@ describe('roomBelongsToSession', () => {
     expect(roomBelongsToSession(roomWithClient, 'some-session')).toBe(true);
   });
 
+  // 2026-08-19, Claude desktop app. The MCP server is spawned from
+  // claude_desktop_config.json, which carried no CLAUDECODE marker, so it
+  // stamped every room `clientKind: 'unknown'`. The Stop hook is spawned by
+  // Claude Code itself, sees CLAUDECODE=1, and resolves 'claude-code'. The
+  // kinds never matched, so this function rejected the room, the hook emitted
+  // no keep-alive, and the agent dropped out one turn after joining. 'unknown'
+  // means "detection failed", never "belongs to another client".
+  describe("'unknown' is a detection failure, not a different owner", () => {
+    // detectHarness reads the real environment, and the machine running the
+    // suite may well BE a Codex / Cursor / VS Code session. Blank every marker
+    // so each case controls the kind it is actually testing.
+    beforeEach(() => {
+      for (const key of [
+        'CODEX_RUN_ID', 'CODEX_HOME', 'CURSOR_TRACE_ID', 'CURSOR_AGENT',
+        'ANTIGRAVITY_CLI', 'ANTIGRAVITY', 'GOOGLE_ANTIGRAVITY', 'GEMINI_CLI',
+        'GOOGLE_GEMINI_CLI', 'CLAUDE_DESKTOP_VERSION', '__CFBundleIdentifier',
+        'CLINE_VERSION', 'WINDSURF_VERSION', 'TERM_PROGRAM', 'GITHUB_COPILOT',
+        'COPILOT_AGENT', 'VSCODE_COPILOT', 'VSCODE_GITHUB_COPILOT', 'VSCODE_PID',
+        'VSCODE_CWD', 'VSCODE_IPC_HOOK_CLI', 'AGENT_ROOM_RUN_ID',
+      ]) vi.stubEnv(key, '');
+    });
+
+    it('allows a room stamped unknown when the hook resolves claude-code', () => {
+      vi.stubEnv('CLAUDECODE', '1');
+      expect(roomBelongsToSession({ ...base, clientKind: 'unknown' }, 'sess-a')).toBe(true);
+    });
+
+    it('allows a room stamped claude-code when the hook itself resolves unknown', () => {
+      vi.stubEnv('CLAUDECODE', '');
+      vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+      expect(roomBelongsToSession({ ...base, clientKind: 'claude-code' }, 'sess-a')).toBe(true);
+    });
+
+    it('still partitions two clients that both identified themselves', () => {
+      vi.stubEnv('CLAUDECODE', '1');
+      expect(roomBelongsToSession({ ...base, clientKind: 'cursor' }, 'sess-a')).toBe(false);
+    });
+
+    it('does not let the wildcard override an explicit session owner', () => {
+      vi.stubEnv('CLAUDECODE', '1');
+      const claimed = { ...base, clientKind: 'unknown', sessionKey: 'sess-a' };
+      expect(roomBelongsToSession(claimed, 'sess-b')).toBe(false);
+    });
+  });
+
   // The hole clientKind alone does not close: Robin's Reddit chat and the chat
   // that joined the room were BOTH Codex, so they share one clientKind
   // partition. The room is unclaimed until someone hits Stop, and until 0.26.9

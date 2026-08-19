@@ -29,6 +29,24 @@ describe('T-18: Claude Code self-identifies to the MCP server', () => {
     expect(claudeJsonBlock.slice(0, 600)).toContain("servers['agent-room'] = CLAUDE_CODE_MCP_ENTRY;");
   });
 
+  // The half of T-18 that was missed: the desktop app's Code surface reads
+  // claude_desktop_config.json, not ~/.claude.json, and spawns the MCP server
+  // through Claude.app's own helper. Writing the marker to only one of the two
+  // files left the desktop app reporting 'unknown' and dropping out of rooms.
+  it('writes that entry into the desktop app config too', () => {
+    const desktopBlock = SRC.slice(SRC.indexOf('async function installClaude(opts:'));
+    expect(desktopBlock.slice(0, 600)).toContain("servers['agent-room'] = CLAUDE_CODE_MCP_ENTRY;");
+  });
+
+  // `init print` is what users hand-copy when the installer cannot write for
+  // them; an unmarked sample reproduces the bug by hand.
+  it('prints the marked entry for both Claude config files', () => {
+    const printBlock = SRC.slice(SRC.indexOf('function printConfigs()'));
+    const claudeSection = printBlock.slice(0, printBlock.indexOf('--- Cursor'));
+    expect(claudeSection).toContain('CLAUDE_CODE_MCP_ENTRY');
+    expect(claudeSection.match(/console\.log\(claudeMcp\)/g)?.length).toBe(2);
+  });
+
   // The regression that matters more than the fix: detectHarness checks
   // CLAUDECODE FIRST, so putting the marker on the shared entry would make
   // Cursor / Gemini / Antigravity all report themselves as claude-code.
