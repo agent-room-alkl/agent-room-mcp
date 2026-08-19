@@ -1,0 +1,58 @@
+name: Release npm package
+
+# Manual only — this repo's version bumps go through a reviewed PR (see the
+# apps/mcp/package.json diff on the bump commit), so publishing is a
+# deliberate second step, not something that fires on every push to main.
+# Run it from the Actions tab after a version-bump PR has merged.
+"on":
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # workflow_dispatch lets you pick any ref to run from; refuse anything
+    # but main so a stray run from a feature branch can't publish
+    # unreviewed code under the package's real version number.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          # Writes an .npmrc pointing at the public registry with
+          # NODE_AUTH_TOKEN wired in below — the standard actions/setup-node
+          # publish pattern.
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm -w apps/mcp run typecheck
+
+      - run: npm -w apps/mcp test -- --run
+
+      # `npm publish` refuses a version that's already on the registry, but
+      # only after the build/test steps above have run. Catch it here first
+      # with a message that says what to actually do about it.
+      - name: Verify version was bumped
+        working-directory: apps/mcp
+        run: |
+          local_version="$(node -p "require('./package.json').version")"
+          published_version="$(npm view agent-room-mcp version 2>/dev/null || echo 'none')"
+          echo "local: $local_version — published: $published_version"
+          if [ "$local_version" = "$published_version" ]; then
+            echo "::error::apps/mcp/package.json is still at $local_version, which is already published. Bump the version first (see the release/* PRs for the pattern) and merge that before running this workflow."
+            exit 1
+          fi
+
+      - name: Publish
+        working-directory: apps/mcp
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
