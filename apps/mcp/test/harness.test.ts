@@ -4,6 +4,8 @@ import {
   detectHarness,
   mcpTimeoutHint,
   persistenceSetupHint,
+  STRONG_MAX_LISTEN_MS,
+  WEAK_MAX_LISTEN_MS,
 } from '../src/harness.js';
 
 function env(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
@@ -31,10 +33,15 @@ describe('detectHarness', () => {
     expect(detectHarness(env({ CODEX_RUN_ID: 'r1' })).kind).toBe('codex');
   });
 
-  it('detects Claude Desktop via macOS bundle identifier', () => {
+  // Was asserted as kind 'claude-desktop' until 0.26.20. A distinct kind
+  // partitions room state away from the 'claude-code' the stop hook resolves,
+  // which is precisely how agents ended up dropping out of every room. The
+  // desktop surface is now identified by its shorter listen cap, not by a
+  // separate kind — see the 'Claude Code desktop app' block below.
+  it('detects Claude Desktop via macOS bundle identifier, as claude-code', () => {
     expect(
       detectHarness(env({ __CFBundleIdentifier: 'com.anthropic.claudefordesktop' })).kind,
-    ).toBe('claude-desktop');
+    ).toBe('claude-code');
   });
 
   it('detects GitHub Copilot agent mode in VS Code', () => {
@@ -160,5 +167,44 @@ describe('weak-loop listen defaults', () => {
     expect(mcpTimeoutHint(cursor)).toContain('MCP CALL TIMEOUT');
     expect(mcpTimeoutHint(antigravity)).toContain(String(antigravity.maxListenMs));
     expect(mcpTimeoutHint(detectHarness(env({ CLAUDECODE: '1' })))).toBe('');
+  });
+});
+
+// 0.26.19 made the desktop app self-identify as Claude Code, which fixed the
+// dropout but handed it the 270s strong listen cap. Measured 2026-08-19 on
+// Robin's machine: room_listen(240000) fails with "Request timed out" on the
+// desktop app, room_listen(45000) returns cleanly. The CLI has no such limit.
+describe('Claude Code desktop app', () => {
+  const desktop = { CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' };
+
+  it('keeps the claude-code kind so room state still matches the stop hook', () => {
+    expect(detectHarness(desktop).kind).toBe('claude-code');
+  });
+
+  it('caps listens below the transport timeout the CLI does not have', () => {
+    expect(detectHarness(desktop).maxListenMs).toBe(WEAK_MAX_LISTEN_MS);
+    expect(detectHarness({ CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' }).maxListenMs)
+      .toBe(STRONG_MAX_LISTEN_MS);
+  });
+
+  it('still needs no persistence setup — the stop hooks are the same', () => {
+    expect(detectHarness(desktop).needsPersistenceSetup).toBe(false);
+  });
+
+  it('recognises the desktop app from its own markers, without an entrypoint', () => {
+    for (const env of [
+      { __CFBundleIdentifier: 'com.anthropic.claudefordesktop' },
+      { CLAUDE_DESKTOP_VERSION: '1.2.3' },
+    ]) {
+      const info = detectHarness(env);
+      expect(info.kind).toBe('claude-code');
+      expect(info.maxListenMs).toBe(WEAK_MAX_LISTEN_MS);
+    }
+  });
+
+  it('leaves a bare CLI session on the strong profile', () => {
+    const info = detectHarness({ CLAUDECODE: '1' });
+    expect(info.kind).toBe('claude-code');
+    expect(info.maxListenMs).toBe(STRONG_MAX_LISTEN_MS);
   });
 });
