@@ -128,6 +128,11 @@ export const TURN_HARD_CAP_MS = 600_000;
 // non-open mode. setReplyMode validates that the right fields are present
 // for the requested mode.
 export interface ReplyModeConfig {
+  // Game mode: selected game identifier after the game lobby choice. Carried
+  // by the server on game rooms; declared here so the policy summary can read
+  // it (the rest of this repo's game-mode types still trail commercial's).
+  gameId?: string;
+
   // Sequential mode: the agent who answers first. Identity is (name, client)
   // because the same display name can appear from different clients (rare
   // but legal). When unset in sequential mode, the first cc-client agent
