@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Buffer } from 'node:buffer';
-import { buildRoomRetro, myRoleInTurn, summarizeBoard } from '@agent-room/upstash-client';
+import { buildRoomRetro, isConfiguredModerator, myRoleInTurn, summarizeBoard } from '@agent-room/upstash-client';
 import {
   createRoomApiClient,
   createRoom,
@@ -41,7 +41,7 @@ import {
   type RoomApiClient,
 } from './roomApi.js';
 import { getMessagesResilient } from './getMessagesResilient.js';
-import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace, startListenLease } from '@agent-room/shared';
+import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace, ROOM_POLICY_VERSION, roomPolicySummary, startListenLease } from '@agent-room/shared';
 import type {
   Message,
   Participant,
@@ -244,6 +244,37 @@ interface ReplyModeSnapshot {
   // analysis still needs a moderator invoke (canISpeakNow). Absent (not
   // set) outside moderator mode or when the caller can already speak.
   canSendStatusNow?: boolean;
+}
+
+/** The policy brief to attach to a listen result, if any.
+ *
+ *  Re-briefing on every listen that RETURNS MESSAGES — i.e. right before the
+ *  agent decides what to do — is the point. The policy is handed over once at
+ *  join, which is invisible 170 messages later, and the host can switch the
+ *  room's mode under a live agent at any time (setReplyMode), so the contract
+ *  an agent joined under may not be the one it is acting under.
+ *
+ *  The Moderator seat needs it most: the one-line moderator policy is the
+ *  SUB-AGENT's contract ("reply when assigned or directly addressed"), which
+ *  reads to a moderator as "you were addressed, so answer" — and it does the
+ *  work itself instead of routing it. Quiet listens return nothing to act on
+ *  and stay lean. */
+export function listenPolicyBrief(
+  room: Room,
+  selfName: string | undefined,
+  messageCount: number,
+): { roomPolicy?: string; policyVersion?: number; isModerator: boolean } {
+  if (!selfName || messageCount === 0) return { isModerator: false };
+  const isModerator = isConfiguredModerator(room, selfName, 'cc');
+  return {
+    isModerator,
+    roomPolicy: roomPolicySummary(
+      room.replyMode,
+      room.modeConfig?.gameId,
+      isModerator ? 'moderator' : 'member',
+    ),
+    policyVersion: ROOM_POLICY_VERSION,
+  };
 }
 
 async function readReplyModeSnapshot(
@@ -1510,10 +1541,12 @@ export function registerTools(server: Server) {
       // poll iteration) — listen-returns happen on the order of every
       // few minutes, so this is negligible.
       let snapshot: ReplyModeSnapshot | undefined;
+      let brief: ReturnType<typeof listenPolicyBrief> = { isModerator: false };
       if (!result.terminated) {
         try {
           const room = await getRoom(client, a.code);
           snapshot = await readReplyModeSnapshot(client, room, selfName);
+          brief = listenPolicyBrief(room, selfName, result.messages.length);
         } catch { /* snapshot is best-effort */ }
       }
       return ok({
@@ -1523,7 +1556,10 @@ export function registerTools(server: Server) {
         ...(result.gamePrivate !== undefined ? { gamePrivate: result.gamePrivate } : {}),
         ...(result.terminated ? { terminated: result.terminated } : {}),
         ...(snapshot ?? {}),
-        hint: result.hint,
+        ...(brief.roomPolicy ? { roomPolicy: brief.roomPolicy, policyVersion: brief.policyVersion } : {}),
+        hint: brief.isModerator
+          ? `You are this room's Moderator — follow roomPolicy: assign the work by name and synthesize, do not do it yourself. ${result.hint}`
+          : result.hint,
       });
     }
 

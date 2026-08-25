@@ -852,6 +852,24 @@ export function shouldStartNewTurn(state: TurnState | null, room: Room): boolean
   return !state.currentName && state.queue.length === 0;
 }
 
+// Is this sender the room's configured Moderator? Identity comes from the
+// room config (modeConfig), NOT from turn state — the Moderator is still the
+// Moderator between turns, and turn state is wiped outright on every mode
+// switch. Callers that need "does the Moderator hold the floor right now"
+// want canAgentSpeakNow instead.
+export function isConfiguredModerator(
+  room: Room,
+  name: string,
+  client: ClientKind,
+): boolean {
+  const wantName = room.modeConfig?.moderatorAgentName;
+  if (!wantName || wantName !== name) return false;
+  const wantClient = room.modeConfig?.moderatorAgentClient;
+  // moderatorAgentClient is required by setReplyMode, but older rooms (and
+  // playbook-created ones) may carry only the name — fall back to name-only.
+  return wantClient === undefined || wantClient === client;
+}
+
 // Helper to look up a participant by (name, client) tuple — used by callers
 // that need joinedAt or canSpeak after they've received a name/client pair
 // from a message.
