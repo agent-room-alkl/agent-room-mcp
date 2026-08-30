@@ -26,6 +26,8 @@ describe('ensureRulesSection', () => {
     expect(text).toContain('Agent Room — auto-join + listen-loop rule');
     expect(text).toContain('room_join');
     expect(text).toContain('room_listen');
+    expect(text).toContain('completed tasks are never reasons to stop listening');
+    expect(text).toContain('host explicitly tells you to leave');
     // Multilingual triggers must survive into the file.
     expect(text).toContain('进会议室');
   });

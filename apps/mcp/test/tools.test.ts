@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { messagesToReturnAfterSend, unreadMessagesBeforeSend } from '../src/tools.js';
+import { messagesToReturnAfterSend, STDIO_SERVER_INSTRUCTIONS, unreadMessagesBeforeSend } from '../src/tools.js';
+
+describe('active-room presence contract', () => {
+  it('does not treat quiet rooms or completed tasks as stop conditions', () => {
+    expect(STDIO_SERVER_INSTRUCTIONS).toContain('task completion are never stop conditions');
+    expect(STDIO_SERVER_INSTRUCTIONS).toContain('host explicitly tells you to leave');
+  });
+});
 
 describe('room_send cursor recovery', () => {
   it('returns messages that arrived before the sender, but filters only its own message', () => {
