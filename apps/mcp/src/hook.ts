@@ -5,10 +5,6 @@ import {
   readHarnessStateOrMerged,
   updateCursor,
   updateCursorEverywhere,
-  bumpBlockStreak,
-  bumpBlockStreakEverywhere,
-  resetBlockStreak,
-  resetBlockStreakEverywhere,
   removeRoom,
   removeRoomEverywhere,
   claimRoomSessionEverywhere,
@@ -23,22 +19,6 @@ import { detectHarness } from './harness.js';
 // only get an 8-second window to catch a web user's reply before sleeping.
 const POLL_MAX_MS = 30_000;
 const POLL_INTERVAL_MS = 1_500;
-
-// How many CONSECUTIVE no-message blocks we issue before letting the agent
-// actually stop. Each block runs for up to POLL_MAX_MS, so 60 × 30s = 30 min
-// of guaranteed presence after the agent's last meaningful action. The
-// streak resets whenever a real message arrives (productive activity is
-// not penalized) and on UserPromptSubmit. This is the practical bound on
-// how long an idle agent stays "listening" after a quiet stretch.
-//
-// Was 12 (= 6 min). Raised to 60 because users running long meetings
-// reported agents disappearing 6 minutes in during a natural pause; the
-// fixed cap was the bottleneck, not the user's instruction. Override by
-// setting AGENT_ROOM_MAX_BLOCKS in the environment.
-const MAX_BLOCKS_PER_CYCLE = (() => {
-  const fromEnv = parseInt(process.env.AGENT_ROOM_MAX_BLOCKS ?? '', 10);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 60;
-})();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -239,60 +219,6 @@ export async function runHook(): Promise<void> {
   // per-process parent relationship.
   const stateScope: StateScope = cursorMode ? 'harness' : 'scoped';
 
-  // User typed something — fresh turn cycle. Reset the block streak so the
-  // next Stop hook can block fresh up to MAX_BLOCKS_PER_CYCLE times.
-  if (event === 'UserPromptSubmit') {
-    try {
-      if (stateScope === 'harness') await resetBlockStreakEverywhere();
-      else await resetBlockStreak();
-    } catch { /* non-essential */ }
-  }
-
-  // Cap the autonomous block-continue chain. We DO allow continuing past
-  // stop_hook_active=true (so two agents can chat back-and-forth without the
-  // user having to retype), but we cap at MAX_BLOCKS_PER_CYCLE to ensure
-  // there's always an exit. UserPromptSubmit (Claude Code) and the Cursor
-  // loop_count reset on user input both feed into the same logic.
-  // For Cursor, `loop_count` is server-side; we still respect our own
-  // streak cap as the durable backstop. (Cursor's own `loop_limit: null`
-  // makes it unlimited from Cursor's side, so this cap is what actually
-  // bounds the chain.)
-  if (event === 'Stop' && (input.stop_hook_active === true || cursorMode)) {
-    const state = await readHookState(stateScope);
-    const streak = state.blockStreak ?? 0;
-    if (streak >= MAX_BLOCKS_PER_CYCLE) {
-      // Two-phase cap: first hit emits an explicit notice (no more silent
-      // process.exit), second hit actually stops. Future user input resets
-      // the counter via UserPromptSubmit (CC) or the next user message in
-      // Cursor (loop_count resets to 0).
-      if (streak < MAX_BLOCKS_PER_CYCLE + 1) {
-        try {
-          if (stateScope === 'harness') await bumpBlockStreakEverywhere();
-          else await bumpBlockStreak();
-        } catch { /* non-essential */ }
-        const idleMin = Math.round((MAX_BLOCKS_PER_CYCLE * POLL_MAX_MS) / 60_000);
-        const text = [
-          `[agent-room] Idle presence cap reached (~${idleMin} min of quiet Stop-hook keep-alives).`,
-          '',
-          'Autonomous keep-alive is ending — this is NOT a silent disconnect.',
-          'If the meeting is still active, call room_listen ONCE more, then wait for the host/user.',
-          'Do not keep looping room_listen forever after this notice. UserPromptSubmit resets the budget.',
-        ].join('\n');
-        if (cursorMode) {
-          process.stdout.write(JSON.stringify({ followup_message: text }));
-        } else {
-          process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
-        }
-        process.exit(0);
-      }
-      try {
-        if (stateScope === 'harness') await resetBlockStreakEverywhere();
-        else await resetBlockStreak();
-      } catch { /* non-essential */ }
-      process.exit(0);
-    }
-  }
-
   let pending: PendingRoom[];
   try {
     pending = await fetchPending(stateScope, sessionKey);
@@ -315,7 +241,7 @@ export async function runHook(): Promise<void> {
       const deadline = Date.now() + POLL_MAX_MS;
       // Ease 1.5s -> 5s across the window: the first replies usually land
       // fast; past ~10s of quiet, finer granularity is pure API load (this
-      // loop runs on every Stop, up to MAX_BLOCKS_PER_CYCLE times per cycle).
+      // loop runs on every Stop while the room remains active).
       let pollDelay = POLL_INTERVAL_MS;
       while (Date.now() < deadline) {
         await sleep(pollDelay);
@@ -330,14 +256,9 @@ export async function runHook(): Promise<void> {
     }
   }
 
-  // Fix A continued: if we got messages, deliver them and RESET the block
-  // streak (productive activity isn't penalized — the cap exists to bound
-  // pure idle loops, not real conversations).
+  // Fix A continued: if we got messages, deliver them and keep the room turn
+  // alive so the agent replies and immediately resumes listening.
   if (withMessages.length > 0 && event === 'Stop') {
-    try {
-      if (stateScope === 'harness') await resetBlockStreakEverywhere();
-      else await resetBlockStreak();
-    } catch { /* non-essential */ }
     const text = formatMessages(withMessages);
     if (cursorMode) {
       // Cursor expects `{ followup_message }` and submits it as the next
@@ -353,9 +274,8 @@ export async function runHook(): Promise<void> {
 
   // Fix A + B: still no messages, but there are active rooms. Force the
   // agent to call room_listen again instead of letting it sleep silently.
-  // bumpBlockStreak() advances the cap; we already short-circuited on the
-  // cap up top (`stop_hook_active && streak >= MAX`), so reaching this
-  // branch means we have budget for one more keep-alive nudge.
+  // There is deliberately no idle cap: quiet rooms and completed tasks do
+  // not end presence; only room end/removal or explicit host direction does.
   if (withMessages.length === 0 && event === 'Stop') {
     let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
     try {
@@ -395,10 +315,6 @@ export async function runHook(): Promise<void> {
     } catch { /* fall through to plain exit */ }
 
     if (activeRooms.length > 0) {
-      try {
-        if (stateScope === 'harness') await bumpBlockStreakEverywhere();
-        else await bumpBlockStreak();
-      } catch { /* non-essential */ }
       const lines: string[] = [];
       lines.push('[agent-room] No new messages during the long-poll, but you are still in an active room.');
       lines.push('');
