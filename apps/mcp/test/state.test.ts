@@ -80,6 +80,88 @@ describe('mergeStates', () => {
   });
 });
 
+describe('Claude Code session-scoped state (the npx PPID mismatch)', () => {
+  // The bug: `state-${process.ppid}.json` assumed the MCP server and the hook
+  // are both spawned DIRECTLY by Claude Code. Run either through `npx` — which
+  // the documented config does for both — and an `npm exec` process sits in
+  // between, with a different pid per invocation. The server wrote one file,
+  // every hook invocation read another (empty) one, so the hook never found a
+  // room and never blocked. CLAUDE_CODE_SESSION_ID is visible to both.
+  beforeEach(() => {
+    vi.stubEnv('CLAUDECODE', '1');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', 'cli');
+    vi.stubEnv('CODEX_RUN_ID', '');
+    vi.stubEnv('CURSOR_TRACE_ID', '');
+    vi.stubEnv('AGENT_ROOM_RUN_ID', '');
+  });
+
+  it('writes session-scoped harness state alongside the PPID-scoped state', async () => {
+    const dir = await makeStateDir('agent-room-state-cc-write-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDE_CODE_SESSION_ID', 'sess-abc');
+
+    const { setRoom } = await import('../src/state.js');
+    await setRoom('ABC-DEF-GHJ', { name: 'Claude', cursor: 3, joinedAt: 123 });
+
+    const files = await fs.readdir(dir);
+    expect(files).toContain('state-harness-claude-code-sess-abc.json');
+    const raw = await fs.readFile(join(dir, 'state-harness-claude-code-sess-abc.json'), 'utf8');
+    expect(JSON.parse(raw).rooms['ABC-DEF-GHJ']).toMatchObject({ name: 'Claude', cursor: 3 });
+  });
+
+  it('finds the room from a hook process whose PPID file does not exist', async () => {
+    // The regression this fix exists for. Deleting every PPID file models the
+    // hook: same session, different `npm exec` parent, so `state-<ppid>.json`
+    // resolves to a name nothing has ever written.
+    const dir = await makeStateDir('agent-room-state-cc-read-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDE_CODE_SESSION_ID', 'sess-abc');
+
+    const { setRoom } = await import('../src/state.js');
+    await setRoom('ABC-DEF-GHJ', { name: 'Claude', cursor: 5, joinedAt: 456 });
+
+    for (const name of await fs.readdir(dir)) {
+      if (/^state-\d+\.json$/.test(name)) await fs.rm(join(dir, name));
+    }
+
+    const { readHarnessStateOrMerged } = await import('../src/state.js');
+    expect((await readHarnessStateOrMerged()).rooms['ABC-DEF-GHJ']).toMatchObject({
+      name: 'Claude',
+      cursor: 5,
+    });
+  });
+
+  it('falls back to PPID scope when no session id is exposed', async () => {
+    // An older Claude Code that does not export the session id must not get a
+    // SHARED harness file — that would broadcast rooms to every window.
+    const dir = await makeStateDir('agent-room-state-cc-anon-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDE_CODE_SESSION_ID', '');
+
+    const { setRoom, hasRunScopedHarnessState } = await import('../src/state.js');
+    expect(hasRunScopedHarnessState()).toBe(false);
+    await setRoom('ABC-DEF-GHJ', { name: 'Claude', cursor: 1, joinedAt: 1 });
+
+    const files = await fs.readdir(dir);
+    expect(files.some((n) => n.startsWith('state-harness-'))).toBe(false);
+    expect(files.some((n) => /^state-\d+\.json$/.test(n))).toBe(true);
+  });
+
+  it('keeps two Claude Code windows in separate files', async () => {
+    const dir = await makeStateDir('agent-room-state-cc-split-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+
+    vi.stubEnv('CLAUDE_CODE_SESSION_ID', 'sess-a');
+    const a = await import('../src/state.js');
+    await a.setRoom('AAA-AAA-AAA', { name: 'Claude', cursor: 1, joinedAt: 1 });
+
+    vi.resetModules();
+    vi.stubEnv('CLAUDE_CODE_SESSION_ID', 'sess-b');
+    const b = await import('../src/state.js');
+    expect(await b.readHarnessStateOrMerged()).toMatchObject({ rooms: {} });
+  });
+});
+
 describe('state harness files', () => {
   beforeEach(() => {
     // detectHarness matches Claude Code's env vars before CODEX_RUN_ID —

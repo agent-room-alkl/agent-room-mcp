@@ -5,11 +5,18 @@ import { detectHarness, harnessRunId } from './harness.js';
 
 const STATE_DIR = process.env.AGENT_ROOM_STATE_DIR || join(homedir(), '.agent-room');
 
-// Scope state per Claude Code session. The MCP server and the hook command are
-// both spawned directly by Claude Code, so they share a parent PID. Two parallel
-// sessions on the same machine end up with distinct files — without this, the
-// later writer's `name` would clobber the earlier one's, and each session's
-// hook would filter the *other* agent's messages as "own" by mistake.
+// PPID-scoped state. Two parallel sessions on the same machine end up with
+// distinct files — without this, the later writer's `name` would clobber the
+// earlier one's, and each session's hook would filter the *other* agent's
+// messages as "own" by mistake.
+//
+// This is a FALLBACK, not the primary identity. It assumes the MCP server and
+// the hook command are both spawned directly by the harness and therefore share
+// a parent PID — which is false whenever either side runs through `npx`, since
+// `npm exec` inserts a process of its own and its pid differs per invocation.
+// Harnesses that expose a session id to their child processes (see
+// harnessRunId) get a run-scoped file instead; this path only serves the ones
+// that do not.
 //
 // Override with AGENT_ROOM_STATE_FILE to share state across sessions on purpose
 // (e.g. integration tests).
@@ -32,14 +39,24 @@ function runScopedHarnessStateFile(kind: string): string | null {
 function currentHarnessStateFile(): string | null {
   if (process.env.AGENT_ROOM_STATE_FILE) return null;
   const kind = detectHarness().kind;
-  if (kind !== 'cursor' && kind !== 'codex') return null;
+  if (kind !== 'cursor' && kind !== 'codex' && kind !== 'claude-code') return null;
   const scoped = runScopedHarnessStateFile(kind);
   if (scoped) return scoped;
-  // Codex Desktop does not currently expose a run id in every integration.
-  // A shared Codex harness file is unsafe in that case: use the PPID-scoped
-  // STATE_FILE instead of broadcasting rooms to every desktop thread.
-  if (kind === 'codex') return null;
+  // Codex Desktop does not currently expose a run id in every integration, and
+  // a Claude Code old enough to not export CLAUDE_CODE_SESSION_ID is in the
+  // same position. A SHARED harness file is unsafe there: it would broadcast
+  // rooms to every thread on that harness. Fall back to the PPID-scoped file.
+  if (kind === 'codex' || kind === 'claude-code') return null;
   return join(STATE_DIR, `state-harness-${kind}.json`);
+}
+
+/** True when this process can resolve a run-scoped harness state file, i.e. the
+ *  harness hands both the MCP server and the hook the same session identity.
+ *  The hook uses this to pick its state scope: with a shared identity the
+ *  harness file is authoritative, without one the PPID file is all there is. */
+export function hasRunScopedHarnessState(): boolean {
+  if (process.env.AGENT_ROOM_STATE_FILE) return false;
+  return Boolean(runScopedHarnessStateFile(detectHarness().kind));
 }
 
 export interface RoomState {
@@ -269,7 +286,14 @@ export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
     // With a thread-scoped harness identity, an absent file means this
     // thread has not joined a room. Never fall back to the legacy shared
     // harness file: doing so reintroduces cross-thread Stop-hook injections.
-    if (runScopedHarnessStateFile(detectHarness().kind)) return cloneEmpty();
+    //
+    // Claude Code is the exception, and only until its next join: a room joined
+    // by a pre-0.26.22 server (or by a stale copy still in the npx cache) sits
+    // in a PPID file that no longer gets read, so an absent harness file there
+    // means "not written yet", not "no rooms". Fall through to the merged read,
+    // which roomBelongsToSession still filters by clientKind / sessionKey.
+    const kind = detectHarness().kind;
+    if (kind !== 'claude-code' && runScopedHarnessStateFile(kind)) return cloneEmpty();
   }
   return readMergedState();
 }

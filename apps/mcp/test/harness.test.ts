@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   defaultListenAfterJoin,
   detectHarness,
+  harnessRunId,
   mcpTimeoutHint,
   persistenceSetupHint,
   STRONG_MAX_LISTEN_MS,
@@ -206,5 +207,24 @@ describe('Claude Code desktop app', () => {
     const info = detectHarness({ CLAUDECODE: '1' });
     expect(info.kind).toBe('claude-code');
     expect(info.maxListenMs).toBe(STRONG_MAX_LISTEN_MS);
+  });
+});
+
+describe('harnessRunId — Claude Code session id', () => {
+  // The id is exported to every process Claude Code spawns, so the MCP server
+  // and the hook can agree on it. `process.ppid` cannot: both sides run
+  // through `npx`, which puts a per-invocation `npm exec` in between.
+  it('uses CLAUDE_CODE_SESSION_ID when no other run id is exposed', () => {
+    expect(harnessRunId(env({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'sess-abc' }))).toBe('sess-abc');
+  });
+
+  it('lets an explicit AGENT_ROOM_RUN_ID override it', () => {
+    expect(
+      harnessRunId(env({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'sess-abc', AGENT_ROOM_RUN_ID: 'pinned' }))
+    ).toBe('pinned');
+  });
+
+  it('returns undefined for a Claude Code old enough not to export one', () => {
+    expect(harnessRunId(env({ CLAUDECODE: '1' }))).toBeUndefined();
   });
 });
