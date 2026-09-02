@@ -167,6 +167,7 @@ describe('roomBelongsToSession', () => {
       vi.stubEnv('CODEX_RUN_ID', '');
       vi.stubEnv('CURSOR_TRACE_ID', '');
       vi.stubEnv('AGENT_ROOM_RUN_ID', '');
+      vi.stubEnv('CLAUDE_CODE_SESSION_ID', '');
       const room = { ...base, ownerRunId: 'some-other-run' };
       expect(roomBelongsToSession(room, undefined)).toBe(true);
     });

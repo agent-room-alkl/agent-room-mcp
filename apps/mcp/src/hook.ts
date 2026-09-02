@@ -3,6 +3,7 @@ import type { Message } from '@agent-room/shared';
 import {
   readState,
   readHarnessStateOrMerged,
+  hasRunScopedHarnessState,
   updateCursor,
   updateCursorEverywhere,
   removeRoom,
@@ -217,7 +218,17 @@ export async function runHook(): Promise<void> {
   // Codex harness file would make separate desktop threads see each other's
   // rooms. Cursor retains harness scope for integrations that lack a stable
   // per-process parent relationship.
-  const stateScope: StateScope = cursorMode ? 'harness' : 'scoped';
+  //
+  // Claude Code joins them when it exports CLAUDE_CODE_SESSION_ID, for the
+  // reason Cursor is here: the PPID files do NOT match across processes. Both
+  // sides run through `npx`, so the server's parent is one `npm exec` and this
+  // hook's parent is another — the hook read an empty file and never blocked.
+  // The run-scoped harness file is written by the same server on join, so it is
+  // the only state both processes can agree on.
+  const stateScope: StateScope =
+    cursorMode || (harnessKind === 'claude-code' && hasRunScopedHarnessState())
+      ? 'harness'
+      : 'scoped';
 
   let pending: PendingRoom[];
   try {

@@ -158,7 +158,20 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
  * can never make ownership stricter than the harness can actually support.
  */
 export function harnessRunId(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const raw = env.AGENT_ROOM_RUN_ID || env.CODEX_RUN_ID || env.CURSOR_TRACE_ID;
+  const raw =
+    env.AGENT_ROOM_RUN_ID ||
+    env.CODEX_RUN_ID ||
+    env.CURSOR_TRACE_ID ||
+    // Claude Code exports this to every child process it spawns — the MCP
+    // server and the hook command alike. Before 0.26.22 the Claude Code state
+    // file was keyed on `process.ppid` instead, on the assumption that both
+    // are spawned DIRECTLY by Claude Code. They are not: the documented config
+    // runs each through `npx`, which inserts an `npm exec` process, so the
+    // server wrote `state-<npm-exec-A>.json` while every hook invocation read
+    // `state-<npm-exec-B>.json` — a fresh empty file each time. The hook
+    // therefore never found a room and never emitted `decision: "block"`.
+    // A session id both processes can read removes the pid from the equation.
+    env.CLAUDE_CODE_SESSION_ID;
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
   return trimmed === '' ? undefined : trimmed;
 }
