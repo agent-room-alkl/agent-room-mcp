@@ -1,11 +1,17 @@
 import { createRoomApiClient, getMessages, getRoom } from './roomApi.js';
 import type { Message } from '@agent-room/shared';
+import { readFile } from 'node:fs/promises';
 import {
   readState,
+  setRoom,
   readHarnessStateOrMerged,
   hasRunScopedHarnessState,
   updateCursor,
   updateCursorEverywhere,
+  bumpBlockStreak,
+  bumpBlockStreakEverywhere,
+  resetBlockStreak,
+  resetBlockStreakEverywhere,
   removeRoom,
   removeRoomEverywhere,
   claimRoomSessionEverywhere,
@@ -20,6 +26,27 @@ import { detectHarness } from './harness.js';
 // only get an 8-second window to catch a web user's reply before sleeping.
 const POLL_MAX_MS = 30_000;
 const POLL_INTERVAL_MS = 1_500;
+
+// Stop hooks are a fallback for clients that accidentally finish their turn
+// while they are still in a room. Each continuation starts another model turn,
+// so a broken client/rule must not be able to spend tokens forever.
+//
+// What the fuse counts matters more than where it trips. It counts only IDLE
+// continuations — the ones that hand the agent nothing but "call room_listen
+// again". Delivering real room messages resets it, because that is progress,
+// not spinning. Counting deliveries too would have made the fuse worst in the
+// rooms that are working best: a Cursor session driven entirely by
+// followup_message does one continuation per room message, so a busy meeting
+// would have burned the budget in a few minutes and released the agent — the
+// same silent drop this hook exists to prevent.
+//
+// With only idle continuations counted, a healthy session never approaches the
+// limit, which is why it can be generous. It is deliberately not tuned to any
+// particular client's own continuation cap.
+const MAX_IDLE_CONTINUATIONS = (() => {
+  const fromEnv = parseInt(process.env.AGENT_ROOM_MAX_BLOCKS ?? '', 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 20;
+})();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,6 +71,9 @@ interface HookInput {
   status?: 'completed' | 'aborted' | 'error';
   loop_count?: number;
   conversation_id?: string;
+  // Claude Code: JSONL of the conversation so far. The only way to learn
+  // which room this session is in when nothing local wrote it down.
+  transcript_path?: string;
 }
 
 /** Prefer Codex session_id, then Cursor conversation_id. */
@@ -85,8 +115,230 @@ interface PendingRoom {
 
 type StateScope = 'scoped' | 'harness';
 
+export interface StopContinuationBudget {
+  decision: 'block' | 'allow';
+  streak: number;
+  reason?: string;
+}
+
+async function resetStopContinuationBudget(scope: StateScope): Promise<void> {
+  if (scope === 'harness') await resetBlockStreakEverywhere();
+  else await resetBlockStreak();
+}
+
+/**
+ * Account for exactly one Stop-hook continuation. The call that would exceed
+ * the budget is allowed through and atomically starts the next user-driven
+ * cycle at zero. Exported so the safety property can be tested without
+ * spawning a hook process or making room API calls.
+ */
+export async function applyStopContinuationBudget(
+  scope: StateScope,
+  maxBlocks = MAX_IDLE_CONTINUATIONS,
+): Promise<StopContinuationBudget> {
+  const streak = scope === 'harness'
+    ? await bumpBlockStreakEverywhere()
+    : await bumpBlockStreak();
+  if (streak <= maxBlocks) return { decision: 'block', streak };
+
+  await resetStopContinuationBudget(scope);
+  return {
+    decision: 'allow',
+    streak: 0,
+    reason: `[agent-room] Safety fuse: allowed this turn to stop after ${maxBlocks} consecutive room continuations that delivered no new messages, to prevent a runaway token loop. The continuation counter has been reset.`,
+  };
+}
+
+/**
+ * Emit one Stop-hook continuation.
+ *
+ * `delivered` says whether this continuation carries new room messages. A
+ * delivering continuation is progress: it resets the fuse and is never
+ * refused, so an active room can run indefinitely. Only idle ones — the
+ * "nothing new, go listen again" nudges — are counted and can trip it.
+ */
+async function emitStopContinuation(
+  text: string,
+  cursorMode: boolean,
+  scope: StateScope,
+  delivered: boolean,
+): Promise<void> {
+  if (delivered) {
+    try { await resetStopContinuationBudget(scope); }
+    catch { /* non-essential */ }
+    if (cursorMode) process.stdout.write(JSON.stringify({ followup_message: text }));
+    else process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+    return;
+  }
+  let budget: StopContinuationBudget;
+  try {
+    budget = await applyStopContinuationBudget(scope);
+  } catch {
+    // State accounting is safety-critical. Fail open if it cannot be persisted
+    // rather than creating an unbounded continuation chain.
+    budget = {
+      decision: 'allow',
+      streak: 0,
+      reason: '[agent-room] Safety fuse: allowed this turn to stop because the continuation counter could not be persisted.',
+    };
+  }
+
+  if (budget.decision === 'allow') {
+    // Omitting decision/followup is the documented allow shape. systemMessage
+    // makes the reason visible without scheduling another model turn.
+    process.stdout.write(JSON.stringify({ systemMessage: budget.reason }));
+    return;
+  }
+  if (cursorMode) process.stdout.write(JSON.stringify({ followup_message: text }));
+  else process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+}
+
 async function readHookState(scope: StateScope) {
   return scope === 'harness' ? readHarnessStateOrMerged() : readState();
+}
+
+/** A room this session is in, as recovered from its own transcript. */
+export interface TranscriptRoom {
+  code: string;
+  name: string;
+  cursor: number;
+}
+
+const ROOM_TOOL_RE = /(?:^|_)room_(join|listen|send|task|leave)$/;
+
+/**
+ * Recover the rooms a session is in by reading its own transcript.
+ *
+ * The hook has always answered "am I in a room?" from ~/.agent-room state,
+ * which only the stdio MCP server writes. A user configured with
+ *
+ *   "agent-room": { "type": "http", "url": "https://www.agent-room.com/mcp" }
+ *
+ * never runs that server, so nothing on their machine ever writes that file
+ * and the hook has been a no-op for them — the exact configuration we now
+ * recommend. The transcript is the one local record of the join that exists
+ * either way: the room_join call and every room_listen after it are in it,
+ * with the code, the display name, and the cursor.
+ *
+ * Pure and exported so it can be tested against real transcript text without
+ * a filesystem or a room server.
+ */
+export function roomsFromTranscript(text: string): TranscriptRoom[] {
+  const rooms = new Map<string, { name: string; cursor: number; order: number }>();
+  const left = new Set<string>();
+  // tool_use id -> room code, so a tool_result (which carries no code of its
+  // own) can be attributed back to the room it came from.
+  const callCodes = new Map<string, string>();
+  let order = 0;
+
+  for (const line of text.split('\n')) {
+    // Cheap pre-filter: transcripts are large and mostly unrelated to rooms.
+    if (!line.includes('room_') && !line.includes('listenStatus')) continue;
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+
+      if (block.type === 'tool_use') {
+        const tool = ROOM_TOOL_RE.exec(String(block.name ?? ''));
+        if (!tool) continue;
+        const args = block.input;
+        const code = typeof args?.code === 'string' ? args.code.trim() : '';
+        if (!code) continue;
+        if (typeof block.id === 'string') callCodes.set(block.id, code);
+        if (tool[1] === 'leave') { left.add(code); continue; }
+        const name = typeof args?.name === 'string' ? args.name.trim() : '';
+        const since = typeof args?.since === 'number' ? args.since : 0;
+        const prev = rooms.get(code);
+        rooms.set(code, {
+          // A later call without a name must not erase the name an earlier
+          // one established — room_task, for instance, carries no display
+          // name on some actions.
+          name: name || prev?.name || '',
+          cursor: Math.max(since, prev?.cursor ?? 0),
+          order: order += 1,
+        });
+        continue;
+      }
+
+      if (block.type === 'tool_result') {
+        const code = callCodes.get(String(block.tool_use_id ?? ''));
+        if (!code) continue;
+        const parts = Array.isArray(block.content) ? block.content : [];
+        for (const part of parts) {
+          if (!part || part.type !== 'text' || typeof part.text !== 'string') continue;
+          let body: any;
+          try { body = JSON.parse(part.text); } catch { continue; }
+          // The room told us it is over. Nothing should resurrect it.
+          if (body?.listenStatus === 'ended' || body?.listenStatus === 'removed') {
+            left.add(code);
+            continue;
+          }
+          const cursor = typeof body?.cursor === 'number' ? body.cursor : null;
+          const name = typeof body?.assignedName === 'string' ? body.assignedName.trim() : '';
+          const prev = rooms.get(code);
+          if (cursor === null && !name) continue;
+          rooms.set(code, {
+            name: name || prev?.name || '',
+            cursor: Math.max(cursor ?? 0, prev?.cursor ?? 0),
+            order: prev?.order ?? (order += 1),
+          });
+        }
+      }
+    }
+  }
+
+  return [...rooms.entries()]
+    .filter(([code, r]) => !left.has(code) && r.name)
+    .sort((a, b) => a[1].order - b[1].order)
+    .map(([code, r]) => ({ code, name: r.name, cursor: r.cursor }));
+}
+
+/**
+ * Seed local state from the transcript when nothing else wrote it.
+ *
+ * Only runs when state holds no rooms at all, and only adopts a room the
+ * server confirms is still active with this agent seated — a transcript is
+ * history, and history includes meetings that ended. Once seeded, every
+ * downstream path (pending messages, cleanup, cursor commits) works exactly
+ * as it does for a stdio user, and this never runs again for that room.
+ */
+async function recoverRoomsFromTranscript(
+  scope: StateScope,
+  transcriptPath: string | undefined,
+  sessionKey: string | undefined,
+): Promise<void> {
+  if (!transcriptPath) return;
+  // The harness-scoped file is written by a local stdio server; if that exists
+  // there is nothing to recover. Recovery is for the case where no server ran.
+  if (scope !== 'scoped') return;
+  let state;
+  try { state = await readHookState(scope); } catch { return; }
+  if (Object.keys(state.rooms).length > 0) return;
+
+  let text: string;
+  try { text = await readFile(transcriptPath, 'utf8'); } catch { return; }
+
+  const candidates = roomsFromTranscript(text);
+  if (candidates.length === 0) return;
+
+  const client = createRoomApiClient();
+  for (const candidate of candidates) {
+    try {
+      const room = await getRoom(client, candidate.code);
+      if (room.status !== 'active') continue;
+      if (!room.participants.some(p => p.name === candidate.name && p.client === 'cc')) continue;
+      await setRoom(candidate.code, {
+        name: candidate.name,
+        cursor: candidate.cursor,
+        joinedAt: Date.now(),
+        ...(sessionKey ? { sessionKey } : {}),
+      });
+    } catch { /* room gone or unreachable — leave it out */ }
+  }
 }
 
 async function fetchPending(scope: StateScope, sessionKey?: string): Promise<PendingRoom[]> {
@@ -230,10 +482,24 @@ export async function runHook(): Promise<void> {
       ? 'harness'
       : 'scoped';
 
+  // A real user turn begins a fresh bounded continuation cycle.
+  if (event === 'UserPromptSubmit') {
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
+  }
+
+  // An HTTP-configured client never ran the stdio server, so nothing local
+  // recorded the join. Read it back out of the session's own transcript
+  // before deciding there is no room to keep alive.
+  try { await recoverRoomsFromTranscript(stateScope, input.transcript_path, sessionKey); }
+  catch { /* non-essential */ }
+
   let pending: PendingRoom[];
   try {
     pending = await fetchPending(stateScope, sessionKey);
   } catch {
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
     process.exit(0);
   }
 
@@ -271,22 +537,14 @@ export async function runHook(): Promise<void> {
   // alive so the agent replies and immediately resumes listening.
   if (withMessages.length > 0 && event === 'Stop') {
     const text = formatMessages(withMessages);
-    if (cursorMode) {
-      // Cursor expects `{ followup_message }` and submits it as the next
-      // user message. The text already explains the messages and asks the
-      // agent to call room_send / room_listen, which is exactly what we
-      // want as a follow-up.
-      process.stdout.write(JSON.stringify({ followup_message: text }));
-    } else {
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
-    }
+    await emitStopContinuation(text, cursorMode, stateScope, true);
     process.exit(0);
   }
 
   // Fix A + B: still no messages, but there are active rooms. Force the
   // agent to call room_listen again instead of letting it sleep silently.
-  // There is deliberately no idle cap: quiet rooms and completed tasks do
-  // not end presence; only room end/removal or explicit host direction does.
+  // The continuation budget above is a last-resort fuse for a malfunctioning
+  // client/rule. Normal presence remains the long-running room_listen call.
   if (withMessages.length === 0 && event === 'Stop') {
     let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
     try {
@@ -339,17 +597,19 @@ export async function runHook(): Promise<void> {
       lines.push('');
       lines.push('After the listen returns, decide: reply with room_send (and queue another room_listen), or call room_listen again to keep waiting. A completed task, status summary, or final answer is NOT a valid reason to stop. The only valid reasons to stop are: room ended, you were removed from participants, or the host explicitly said you can leave.');
       const text = lines.join('\n');
-      if (cursorMode) {
-        process.stdout.write(JSON.stringify({ followup_message: text }));
-      } else {
-        process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
-      }
+      await emitStopContinuation(text, cursorMode, stateScope, false);
       process.exit(0);
     }
+    // No active rooms remain (ended, removed, or expired): this Stop is
+    // allowed, so do not carry its streak into a future room session.
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
     process.exit(0);
   }
 
   if (withMessages.length === 0) {
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
     process.exit(0);
   }
 

@@ -1,3 +1,6 @@
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { classifyHookInput, resolveHookSessionKey } from '../src/hook.js';
 import { roomBelongsToSession } from '../src/state.js';
@@ -47,6 +50,78 @@ describe('resolveHookSessionKey', () => {
 
   it('returns undefined when neither is present', () => {
     expect(resolveHookSessionKey({})).toBeUndefined();
+  });
+});
+
+describe('Stop continuation safety fuse', () => {
+  it('blocks N times, allows N+1 with a reason, and resets the streak', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'agent-room-hook-budget-'));
+    const stateFile = join(dir, 'state.json');
+    await fs.writeFile(stateFile, JSON.stringify({ version: 1, rooms: {}, blockStreak: 0 }));
+
+    vi.resetModules();
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', stateFile);
+    try {
+      const { applyStopContinuationBudget } = await import('../src/hook.js');
+      const { readState } = await import('../src/state.js');
+
+      for (let expected = 1; expected <= 3; expected += 1) {
+        await expect(applyStopContinuationBudget('scoped', 3)).resolves.toEqual({
+          decision: 'block',
+          streak: expected,
+        });
+      }
+
+      const released = await applyStopContinuationBudget('scoped', 3);
+      expect(released).toMatchObject({ decision: 'allow', streak: 0 });
+      expect(released.reason).toContain('after 3 consecutive room continuations that delivered no new messages');
+      expect((await readState()).blockStreak).toBe(0);
+
+      // The allow is a real reset, not a permanently exhausted budget.
+      await expect(applyStopContinuationBudget('scoped', 3)).resolves.toEqual({
+        decision: 'block',
+        streak: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never trips while the room is actually delivering messages', async () => {
+    // The fuse exists for a client that spins. A room that keeps handing the
+    // agent real messages is the opposite of spinning, and a Cursor session
+    // driven by followup_message does one continuation per message — so if
+    // deliveries counted, a busy meeting would release the agent within
+    // minutes. resetBlockStreak on the delivering path is what prevents that.
+    const dir = await fs.mkdtemp(join(tmpdir(), 'agent-room-hook-progress-'));
+    const stateFile = join(dir, 'state.json');
+    await fs.writeFile(stateFile, JSON.stringify({ version: 1, rooms: {}, blockStreak: 0 }));
+
+    vi.resetModules();
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', stateFile);
+    try {
+      const { applyStopContinuationBudget } = await import('../src/hook.js');
+      const { readState, resetBlockStreak } = await import('../src/state.js');
+
+      // Two idle nudges, then a real delivery, repeated well past the limit.
+      for (let cycle = 0; cycle < 10; cycle += 1) {
+        await applyStopContinuationBudget('scoped', 3);
+        await applyStopContinuationBudget('scoped', 3);
+        // What the delivering path does before writing its continuation.
+        await resetBlockStreak();
+        expect((await readState()).blockStreak).toBe(0);
+      }
+
+      // 30 continuations later the fuse has still never fired.
+      const next = await applyStopContinuationBudget('scoped', 3);
+      expect(next).toEqual({ decision: 'block', streak: 1 });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -176,5 +251,69 @@ describe('roomBelongsToSession', () => {
       vi.stubEnv('CODEX_RUN_ID', 'reddit-thread');
       expect(roomBelongsToSession({ ...base, clientKind: 'codex' }, undefined)).toBe(true);
     });
+  });
+});
+
+describe('roomsFromTranscript', () => {
+  const line = (content: unknown) => JSON.stringify({ type: 'assistant', message: { content } });
+  const use = (id: string, name: string, input: unknown) =>
+    line([{ type: 'tool_use', id, name, input }]);
+  const result = (id: string, body: unknown) =>
+    line([{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: JSON.stringify(body) }] }]);
+
+  it('recovers the room, the display name, and the latest cursor', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      line([{ type: 'text', text: 'unrelated chatter' }]),
+      use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+      result('t1', { cursor: 3, assignedName: 'Claude', listenStatus: 'active' }),
+      use('t2', 'mcp__agent-room__room_listen', { code: 'ABC-DEF-GHJ', since: 3, name: 'Claude' }),
+      result('t2', { cursor: 11, listenStatus: 'active' }),
+      'not json at all',
+    ].join('\n');
+
+    expect(roomsFromTranscript(text)).toEqual([
+      { code: 'ABC-DEF-GHJ', name: 'Claude', cursor: 11 },
+    ]);
+  });
+
+  it('does not resurrect a room that ended or removed this agent', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    for (const status of ['ended', 'removed']) {
+      const text = [
+        use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+        use('t2', 'mcp__agent-room__room_listen', { code: 'ABC-DEF-GHJ', since: 1, name: 'Claude' }),
+        result('t2', { cursor: 9, listenStatus: status }),
+      ].join('\n');
+      expect(roomsFromTranscript(text)).toEqual([]);
+    }
+  });
+
+  it('honours an explicit room_leave', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+      use('t2', 'mcp__agent-room__room_leave', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+    ].join('\n');
+    expect(roomsFromTranscript(text)).toEqual([]);
+  });
+
+  it('keeps the name from the join when a later call omits it', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+      use('t2', 'mcp__agent-room__room_task', { code: 'ABC-DEF-GHJ', action: 'list' }),
+    ].join('\n');
+    expect(roomsFromTranscript(text)).toEqual([
+      { code: 'ABC-DEF-GHJ', name: 'Claude', cursor: 0 },
+    ]);
+  });
+
+  it('ignores a room it only ever read about, with no code of its own', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      line([{ type: 'text', text: 'someone pasted https://www.agent-room.com/j/ZZZ-ZZZ-ZZZ' }]),
+    ].join('\n');
+    expect(roomsFromTranscript(text)).toEqual([]);
   });
 });
