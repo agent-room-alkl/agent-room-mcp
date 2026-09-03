@@ -253,3 +253,67 @@ describe('roomBelongsToSession', () => {
     });
   });
 });
+
+describe('roomsFromTranscript', () => {
+  const line = (content: unknown) => JSON.stringify({ type: 'assistant', message: { content } });
+  const use = (id: string, name: string, input: unknown) =>
+    line([{ type: 'tool_use', id, name, input }]);
+  const result = (id: string, body: unknown) =>
+    line([{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: JSON.stringify(body) }] }]);
+
+  it('recovers the room, the display name, and the latest cursor', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      line([{ type: 'text', text: 'unrelated chatter' }]),
+      use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+      result('t1', { cursor: 3, assignedName: 'Claude', listenStatus: 'active' }),
+      use('t2', 'mcp__agent-room__room_listen', { code: 'ABC-DEF-GHJ', since: 3, name: 'Claude' }),
+      result('t2', { cursor: 11, listenStatus: 'active' }),
+      'not json at all',
+    ].join('\n');
+
+    expect(roomsFromTranscript(text)).toEqual([
+      { code: 'ABC-DEF-GHJ', name: 'Claude', cursor: 11 },
+    ]);
+  });
+
+  it('does not resurrect a room that ended or removed this agent', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    for (const status of ['ended', 'removed']) {
+      const text = [
+        use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+        use('t2', 'mcp__agent-room__room_listen', { code: 'ABC-DEF-GHJ', since: 1, name: 'Claude' }),
+        result('t2', { cursor: 9, listenStatus: status }),
+      ].join('\n');
+      expect(roomsFromTranscript(text)).toEqual([]);
+    }
+  });
+
+  it('honours an explicit room_leave', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+      use('t2', 'mcp__agent-room__room_leave', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+    ].join('\n');
+    expect(roomsFromTranscript(text)).toEqual([]);
+  });
+
+  it('keeps the name from the join when a later call omits it', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      use('t1', 'mcp__agent-room__room_join', { code: 'ABC-DEF-GHJ', name: 'Claude' }),
+      use('t2', 'mcp__agent-room__room_task', { code: 'ABC-DEF-GHJ', action: 'list' }),
+    ].join('\n');
+    expect(roomsFromTranscript(text)).toEqual([
+      { code: 'ABC-DEF-GHJ', name: 'Claude', cursor: 0 },
+    ]);
+  });
+
+  it('ignores a room it only ever read about, with no code of its own', async () => {
+    const { roomsFromTranscript } = await import('../src/hook.js');
+    const text = [
+      line([{ type: 'text', text: 'someone pasted https://www.agent-room.com/j/ZZZ-ZZZ-ZZZ' }]),
+    ].join('\n');
+    expect(roomsFromTranscript(text)).toEqual([]);
+  });
+});
