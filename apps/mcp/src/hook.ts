@@ -6,6 +6,10 @@ import {
   hasRunScopedHarnessState,
   updateCursor,
   updateCursorEverywhere,
+  bumpBlockStreak,
+  bumpBlockStreakEverywhere,
+  resetBlockStreak,
+  resetBlockStreakEverywhere,
   removeRoom,
   removeRoomEverywhere,
   claimRoomSessionEverywhere,
@@ -20,6 +24,16 @@ import { detectHarness } from './harness.js';
 // only get an 8-second window to catch a web user's reply before sleeping.
 const POLL_MAX_MS = 30_000;
 const POLL_INTERVAL_MS = 1_500;
+
+// Stop hooks are a fallback for clients that accidentally finish their turn
+// while they are still in a room. Each continuation starts another model turn,
+// so a broken client/rule must not be able to spend tokens forever. Claude Code
+// itself currently caps consecutive Stop continuations at eight; use the same
+// conservative default for Codex/Cursor and keep an override for operators.
+const MAX_BLOCKS_PER_CYCLE = (() => {
+  const fromEnv = parseInt(process.env.AGENT_ROOM_MAX_BLOCKS ?? '', 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 8;
+})();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -84,6 +98,68 @@ interface PendingRoom {
 }
 
 type StateScope = 'scoped' | 'harness';
+
+export interface StopContinuationBudget {
+  decision: 'block' | 'allow';
+  streak: number;
+  reason?: string;
+}
+
+async function resetStopContinuationBudget(scope: StateScope): Promise<void> {
+  if (scope === 'harness') await resetBlockStreakEverywhere();
+  else await resetBlockStreak();
+}
+
+/**
+ * Account for exactly one Stop-hook continuation. The call that would exceed
+ * the budget is allowed through and atomically starts the next user-driven
+ * cycle at zero. Exported so the safety property can be tested without
+ * spawning a hook process or making room API calls.
+ */
+export async function applyStopContinuationBudget(
+  scope: StateScope,
+  maxBlocks = MAX_BLOCKS_PER_CYCLE,
+): Promise<StopContinuationBudget> {
+  const streak = scope === 'harness'
+    ? await bumpBlockStreakEverywhere()
+    : await bumpBlockStreak();
+  if (streak <= maxBlocks) return { decision: 'block', streak };
+
+  await resetStopContinuationBudget(scope);
+  return {
+    decision: 'allow',
+    streak: 0,
+    reason: `[agent-room] Safety fuse: allowed this turn to stop after ${maxBlocks} consecutive automated room continuations to prevent a runaway token loop. The continuation counter has been reset.`,
+  };
+}
+
+async function emitStopContinuation(
+  text: string,
+  cursorMode: boolean,
+  scope: StateScope,
+): Promise<void> {
+  let budget: StopContinuationBudget;
+  try {
+    budget = await applyStopContinuationBudget(scope);
+  } catch {
+    // State accounting is safety-critical. Fail open if it cannot be persisted
+    // rather than creating an unbounded continuation chain.
+    budget = {
+      decision: 'allow',
+      streak: 0,
+      reason: '[agent-room] Safety fuse: allowed this turn to stop because the continuation counter could not be persisted.',
+    };
+  }
+
+  if (budget.decision === 'allow') {
+    // Omitting decision/followup is the documented allow shape. systemMessage
+    // makes the reason visible without scheduling another model turn.
+    process.stdout.write(JSON.stringify({ systemMessage: budget.reason }));
+    return;
+  }
+  if (cursorMode) process.stdout.write(JSON.stringify({ followup_message: text }));
+  else process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+}
 
 async function readHookState(scope: StateScope) {
   return scope === 'harness' ? readHarnessStateOrMerged() : readState();
@@ -230,10 +306,18 @@ export async function runHook(): Promise<void> {
       ? 'harness'
       : 'scoped';
 
+  // A real user turn begins a fresh bounded continuation cycle.
+  if (event === 'UserPromptSubmit') {
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
+  }
+
   let pending: PendingRoom[];
   try {
     pending = await fetchPending(stateScope, sessionKey);
   } catch {
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
     process.exit(0);
   }
 
@@ -271,22 +355,14 @@ export async function runHook(): Promise<void> {
   // alive so the agent replies and immediately resumes listening.
   if (withMessages.length > 0 && event === 'Stop') {
     const text = formatMessages(withMessages);
-    if (cursorMode) {
-      // Cursor expects `{ followup_message }` and submits it as the next
-      // user message. The text already explains the messages and asks the
-      // agent to call room_send / room_listen, which is exactly what we
-      // want as a follow-up.
-      process.stdout.write(JSON.stringify({ followup_message: text }));
-    } else {
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
-    }
+    await emitStopContinuation(text, cursorMode, stateScope);
     process.exit(0);
   }
 
   // Fix A + B: still no messages, but there are active rooms. Force the
   // agent to call room_listen again instead of letting it sleep silently.
-  // There is deliberately no idle cap: quiet rooms and completed tasks do
-  // not end presence; only room end/removal or explicit host direction does.
+  // The continuation budget above is a last-resort fuse for a malfunctioning
+  // client/rule. Normal presence remains the long-running room_listen call.
   if (withMessages.length === 0 && event === 'Stop') {
     let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
     try {
@@ -339,17 +415,19 @@ export async function runHook(): Promise<void> {
       lines.push('');
       lines.push('After the listen returns, decide: reply with room_send (and queue another room_listen), or call room_listen again to keep waiting. A completed task, status summary, or final answer is NOT a valid reason to stop. The only valid reasons to stop are: room ended, you were removed from participants, or the host explicitly said you can leave.');
       const text = lines.join('\n');
-      if (cursorMode) {
-        process.stdout.write(JSON.stringify({ followup_message: text }));
-      } else {
-        process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
-      }
+      await emitStopContinuation(text, cursorMode, stateScope);
       process.exit(0);
     }
+    // No active rooms remain (ended, removed, or expired): this Stop is
+    // allowed, so do not carry its streak into a future room session.
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
     process.exit(0);
   }
 
   if (withMessages.length === 0) {
+    try { await resetStopContinuationBudget(stateScope); }
+    catch { /* non-essential */ }
     process.exit(0);
   }
 

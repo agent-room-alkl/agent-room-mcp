@@ -1,3 +1,6 @@
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { classifyHookInput, resolveHookSessionKey } from '../src/hook.js';
 import { roomBelongsToSession } from '../src/state.js';
@@ -47,6 +50,43 @@ describe('resolveHookSessionKey', () => {
 
   it('returns undefined when neither is present', () => {
     expect(resolveHookSessionKey({})).toBeUndefined();
+  });
+});
+
+describe('Stop continuation safety fuse', () => {
+  it('blocks N times, allows N+1 with a reason, and resets the streak', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'agent-room-hook-budget-'));
+    const stateFile = join(dir, 'state.json');
+    await fs.writeFile(stateFile, JSON.stringify({ version: 1, rooms: {}, blockStreak: 0 }));
+
+    vi.resetModules();
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', stateFile);
+    try {
+      const { applyStopContinuationBudget } = await import('../src/hook.js');
+      const { readState } = await import('../src/state.js');
+
+      for (let expected = 1; expected <= 3; expected += 1) {
+        await expect(applyStopContinuationBudget('scoped', 3)).resolves.toEqual({
+          decision: 'block',
+          streak: expected,
+        });
+      }
+
+      const released = await applyStopContinuationBudget('scoped', 3);
+      expect(released).toMatchObject({ decision: 'allow', streak: 0 });
+      expect(released.reason).toContain('after 3 consecutive automated room continuations');
+      expect((await readState()).blockStreak).toBe(0);
+
+      // The allow is a real reset, not a permanently exhausted budget.
+      await expect(applyStopContinuationBudget('scoped', 3)).resolves.toEqual({
+        decision: 'block',
+        streak: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
