@@ -74,7 +74,7 @@ describe('Stop continuation safety fuse', () => {
 
       const released = await applyStopContinuationBudget('scoped', 3);
       expect(released).toMatchObject({ decision: 'allow', streak: 0 });
-      expect(released.reason).toContain('after 3 consecutive automated room continuations');
+      expect(released.reason).toContain('after 3 consecutive room continuations that delivered no new messages');
       expect((await readState()).blockStreak).toBe(0);
 
       // The allow is a real reset, not a permanently exhausted budget.
@@ -82,6 +82,41 @@ describe('Stop continuation safety fuse', () => {
         decision: 'block',
         streak: 1,
       });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never trips while the room is actually delivering messages', async () => {
+    // The fuse exists for a client that spins. A room that keeps handing the
+    // agent real messages is the opposite of spinning, and a Cursor session
+    // driven by followup_message does one continuation per message — so if
+    // deliveries counted, a busy meeting would release the agent within
+    // minutes. resetBlockStreak on the delivering path is what prevents that.
+    const dir = await fs.mkdtemp(join(tmpdir(), 'agent-room-hook-progress-'));
+    const stateFile = join(dir, 'state.json');
+    await fs.writeFile(stateFile, JSON.stringify({ version: 1, rooms: {}, blockStreak: 0 }));
+
+    vi.resetModules();
+    vi.stubEnv('AGENT_ROOM_STATE_FILE', stateFile);
+    try {
+      const { applyStopContinuationBudget } = await import('../src/hook.js');
+      const { readState, resetBlockStreak } = await import('../src/state.js');
+
+      // Two idle nudges, then a real delivery, repeated well past the limit.
+      for (let cycle = 0; cycle < 10; cycle += 1) {
+        await applyStopContinuationBudget('scoped', 3);
+        await applyStopContinuationBudget('scoped', 3);
+        // What the delivering path does before writing its continuation.
+        await resetBlockStreak();
+        expect((await readState()).blockStreak).toBe(0);
+      }
+
+      // 30 continuations later the fuse has still never fired.
+      const next = await applyStopContinuationBudget('scoped', 3);
+      expect(next).toEqual({ decision: 'block', streak: 1 });
     } finally {
       vi.unstubAllEnvs();
       vi.resetModules();

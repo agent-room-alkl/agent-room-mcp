@@ -27,12 +27,23 @@ const POLL_INTERVAL_MS = 1_500;
 
 // Stop hooks are a fallback for clients that accidentally finish their turn
 // while they are still in a room. Each continuation starts another model turn,
-// so a broken client/rule must not be able to spend tokens forever. Claude Code
-// itself currently caps consecutive Stop continuations at eight; use the same
-// conservative default for Codex/Cursor and keep an override for operators.
-const MAX_BLOCKS_PER_CYCLE = (() => {
+// so a broken client/rule must not be able to spend tokens forever.
+//
+// What the fuse counts matters more than where it trips. It counts only IDLE
+// continuations — the ones that hand the agent nothing but "call room_listen
+// again". Delivering real room messages resets it, because that is progress,
+// not spinning. Counting deliveries too would have made the fuse worst in the
+// rooms that are working best: a Cursor session driven entirely by
+// followup_message does one continuation per room message, so a busy meeting
+// would have burned the budget in a few minutes and released the agent — the
+// same silent drop this hook exists to prevent.
+//
+// With only idle continuations counted, a healthy session never approaches the
+// limit, which is why it can be generous. It is deliberately not tuned to any
+// particular client's own continuation cap.
+const MAX_IDLE_CONTINUATIONS = (() => {
   const fromEnv = parseInt(process.env.AGENT_ROOM_MAX_BLOCKS ?? '', 10);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 8;
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 20;
 })();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -118,7 +129,7 @@ async function resetStopContinuationBudget(scope: StateScope): Promise<void> {
  */
 export async function applyStopContinuationBudget(
   scope: StateScope,
-  maxBlocks = MAX_BLOCKS_PER_CYCLE,
+  maxBlocks = MAX_IDLE_CONTINUATIONS,
 ): Promise<StopContinuationBudget> {
   const streak = scope === 'harness'
     ? await bumpBlockStreakEverywhere()
@@ -129,15 +140,31 @@ export async function applyStopContinuationBudget(
   return {
     decision: 'allow',
     streak: 0,
-    reason: `[agent-room] Safety fuse: allowed this turn to stop after ${maxBlocks} consecutive automated room continuations to prevent a runaway token loop. The continuation counter has been reset.`,
+    reason: `[agent-room] Safety fuse: allowed this turn to stop after ${maxBlocks} consecutive room continuations that delivered no new messages, to prevent a runaway token loop. The continuation counter has been reset.`,
   };
 }
 
+/**
+ * Emit one Stop-hook continuation.
+ *
+ * `delivered` says whether this continuation carries new room messages. A
+ * delivering continuation is progress: it resets the fuse and is never
+ * refused, so an active room can run indefinitely. Only idle ones — the
+ * "nothing new, go listen again" nudges — are counted and can trip it.
+ */
 async function emitStopContinuation(
   text: string,
   cursorMode: boolean,
   scope: StateScope,
+  delivered: boolean,
 ): Promise<void> {
+  if (delivered) {
+    try { await resetStopContinuationBudget(scope); }
+    catch { /* non-essential */ }
+    if (cursorMode) process.stdout.write(JSON.stringify({ followup_message: text }));
+    else process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+    return;
+  }
   let budget: StopContinuationBudget;
   try {
     budget = await applyStopContinuationBudget(scope);
@@ -355,7 +382,7 @@ export async function runHook(): Promise<void> {
   // alive so the agent replies and immediately resumes listening.
   if (withMessages.length > 0 && event === 'Stop') {
     const text = formatMessages(withMessages);
-    await emitStopContinuation(text, cursorMode, stateScope);
+    await emitStopContinuation(text, cursorMode, stateScope, true);
     process.exit(0);
   }
 
@@ -415,7 +442,7 @@ export async function runHook(): Promise<void> {
       lines.push('');
       lines.push('After the listen returns, decide: reply with room_send (and queue another room_listen), or call room_listen again to keep waiting. A completed task, status summary, or final answer is NOT a valid reason to stop. The only valid reasons to stop are: room ended, you were removed from participants, or the host explicitly said you can leave.');
       const text = lines.join('\n');
-      await emitStopContinuation(text, cursorMode, stateScope);
+      await emitStopContinuation(text, cursorMode, stateScope, false);
       process.exit(0);
     }
     // No active rooms remain (ended, removed, or expired): this Stop is
