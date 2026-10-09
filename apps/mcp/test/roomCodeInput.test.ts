@@ -52,6 +52,8 @@ describe('room tools accept the join URL, not just the code', () => {
       'https://www.agent-room.com/j/ABC-DEF-GHJ',
       'https://www.agent-room.com/r/ABC-DEF-GHJ',
       'https://www.agent-room.com/j/ABC-DEF-GHJ?ref=x#top',
+      'https://ai-room.pupgo.top/j/ABC-DEF-GHJ',
+      'https://ai-room.pupgo.top/r/ABC-DEF-GHJ',
       'agent-room.com/j/abc-def-ghj',
       'abc-def-ghj',
       'ABCDEFGHJ',
