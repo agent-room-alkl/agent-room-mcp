@@ -12,6 +12,8 @@
 // uploadAttachment.ts already uses) so self-hosters can point at their own
 // deploy.
 
+import { publicBaseUrl } from './publicBaseUrl.js';
+
 import type {
   ClientKind,
   Message,
@@ -83,8 +85,7 @@ function errorFromBody(error: string | undefined, message: string, status: numbe
 }
 
 function apiEndpoint(): string {
-  const base = (process.env.AGENT_ROOM_BASE_URL ?? 'https://www.agent-room.com').replace(/\/$/, '');
-  return `${base}/api/room`;
+  return `${publicBaseUrl()}/api/room`;
 }
 
 export interface RoomApiClient {

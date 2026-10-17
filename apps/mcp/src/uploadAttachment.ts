@@ -8,6 +8,7 @@
 
 import { Buffer } from 'node:buffer';
 import type { MessageAttachment } from '@agent-room/shared';
+import { publicBaseUrl } from './publicBaseUrl.js';
 
 // Mirror the limits in apps/web/src/lib/upload.ts so we fail fast at the
 // MCP boundary instead of round-tripping a doomed multipart upload. The
@@ -53,8 +54,7 @@ export class AttachmentUploadError extends Error {
 }
 
 function uploadEndpoint(): string {
-  const base = (process.env.AGENT_ROOM_BASE_URL ?? 'https://www.agent-room.com').replace(/\/$/, '');
-  return `${base}/api/upload`;
+  return `${publicBaseUrl()}/api/upload`;
 }
 
 /** Validate one attachment input and return its decoded byte length, or throw. */
